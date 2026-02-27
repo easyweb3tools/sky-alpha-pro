@@ -28,6 +28,14 @@ Week 4 delivery:
 - weather APIs: `GET /api/v1/weather/forecast`, `GET /api/v1/weather/observation/:station`
 - weather CLI: `weather forecast`, `weather observe`
 
+Week 5 delivery:
+
+- probability model v1 (temperature market probability estimation)
+- edge calculation (`our_estimate - market_price`)
+- signal generation and persistence (`signals` table)
+- signal APIs: `GET /api/v1/signals`, `POST /api/v1/signals/generate`
+- signal CLI: `signal generate`, `signal list`
+
 ## MVP Database Rule
 
 MVP 阶段数据库表结构统一由 GORM `AutoMigrate` 管理：
@@ -108,6 +116,27 @@ REST API:
 ```bash
 curl "http://127.0.0.1:8080/api/v1/weather/forecast?location=40.7829,-73.9654&source=all&days=5"
 curl "http://127.0.0.1:8080/api/v1/weather/observation/KNYC"
+```
+
+## Signal Generation (W5)
+
+Generate signals in batch:
+
+```bash
+go run ./cmd/sky-alpha-pro signal generate --limit 100
+```
+
+List latest signals:
+
+```bash
+go run ./cmd/sky-alpha-pro signal list --limit 20 --min-edge 5
+```
+
+REST API:
+
+```bash
+curl -X POST "http://127.0.0.1:8080/api/v1/signals/generate?limit=100"
+curl "http://127.0.0.1:8080/api/v1/signals?limit=20&min_edge=5"
 ```
 
 ## Container

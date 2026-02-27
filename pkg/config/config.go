@@ -14,6 +14,7 @@ type Config struct {
 	Server   ServerConfig   `mapstructure:"server"`
 	Market   MarketConfig   `mapstructure:"market"`
 	Weather  WeatherConfig  `mapstructure:"weather"`
+	Signal   SignalConfig   `mapstructure:"signal"`
 	Database DatabaseConfig `mapstructure:"database"`
 	Log      LogConfig      `mapstructure:"log"`
 }
@@ -62,6 +63,12 @@ type WeatherConfig struct {
 	VisualCrossingAPIKey      string        `mapstructure:"visualcrossing_api_key"`
 	RequestTimeout            time.Duration `mapstructure:"request_timeout"`
 	UserAgent                 string        `mapstructure:"user_agent"`
+}
+
+type SignalConfig struct {
+	MinEdgePct   float64 `mapstructure:"min_edge_pct"`
+	MaxMarkets   int     `mapstructure:"max_markets"`
+	DefaultLimit int     `mapstructure:"default_limit"`
 }
 
 type LogConfig struct {
@@ -127,6 +134,10 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("weather.visualcrossing_api_key", "")
 	v.SetDefault("weather.request_timeout", "12s")
 	v.SetDefault("weather.user_agent", "sky-alpha-pro/0.1.0")
+
+	v.SetDefault("signal.min_edge_pct", 5.0)
+	v.SetDefault("signal.max_markets", 500)
+	v.SetDefault("signal.default_limit", 50)
 
 	v.SetDefault("database.host", "127.0.0.1")
 	v.SetDefault("database.port", 5432)

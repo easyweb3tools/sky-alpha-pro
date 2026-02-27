@@ -28,6 +28,11 @@ weather:
   request_timeout: 12s
   user_agent: sky-alpha-pro/0.1.0
 
+signal:
+  min_edge_pct: 5.0
+  max_markets: 500
+  default_limit: 50
+
 database:
   host: 127.0.0.1
   port: 5432
