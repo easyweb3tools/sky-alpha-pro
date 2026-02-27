@@ -19,6 +19,7 @@ type GammaMarket struct {
 	IsResolved    bool
 	Resolution    string
 	VolumeTotal   float64
+	Volume24h     float64
 	Liquidity     float64
 	PriceYes      float64
 	PriceNo       float64
@@ -37,6 +38,7 @@ type SyncResult struct {
 type ListOptions struct {
 	ActiveOnly bool
 	City       string
+	MarketType string
 	Limit      int
 }
 

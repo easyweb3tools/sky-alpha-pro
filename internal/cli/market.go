@@ -84,9 +84,10 @@ func newMarketSyncCmd() *cobra.Command {
 
 func newMarketListCmd() *cobra.Command {
 	var (
-		limit  int
-		city   string
-		active bool
+		limit      int
+		city       string
+		marketType string
+		active     bool
 	)
 
 	cmd := &cobra.Command{
@@ -107,6 +108,7 @@ func newMarketListCmd() *cobra.Command {
 			items, err := svc.ListMarketSnapshots(context.Background(), market.ListOptions{
 				ActiveOnly: active,
 				City:       city,
+				MarketType: marketType,
 				Limit:      limit,
 			})
 			if err != nil {
@@ -144,6 +146,7 @@ func newMarketListCmd() *cobra.Command {
 
 	cmd.Flags().IntVar(&limit, "limit", 20, "result size limit")
 	cmd.Flags().StringVar(&city, "city", "", "city filter")
+	cmd.Flags().StringVar(&marketType, "type", "", "market type filter")
 	cmd.Flags().BoolVar(&active, "active", true, "show active markets only")
 	return cmd
 }

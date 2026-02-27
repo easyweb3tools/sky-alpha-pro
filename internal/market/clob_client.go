@@ -36,14 +36,15 @@ func (c *CLOBClient) GetSpread(ctx context.Context, tokenID string) (float64, er
 }
 
 func (c *CLOBClient) getNumber(ctx context.Context, path string, keys []string) (float64, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+path, nil)
-	if err != nil {
-		return 0, fmt.Errorf("build clob request: %w", err)
-	}
-	req.Header.Set("Accept", "application/json")
-	req.Header.Set("User-Agent", "sky-alpha-pro/0.1.0")
-
-	resp, err := c.client.Do(req)
+	resp, err := doRequestWithRetry(ctx, c.client, func() (*http.Request, error) {
+		req, buildErr := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+path, nil)
+		if buildErr != nil {
+			return nil, fmt.Errorf("build clob request: %w", buildErr)
+		}
+		req.Header.Set("Accept", "application/json")
+		req.Header.Set("User-Agent", "sky-alpha-pro/0.1.0")
+		return req, nil
+	}, 3)
 	if err != nil {
 		return 0, fmt.Errorf("request clob %s: %w", path, err)
 	}

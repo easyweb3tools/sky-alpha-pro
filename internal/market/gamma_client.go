@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"regexp"
@@ -22,10 +23,14 @@ var weatherMarketPattern = regexp.MustCompile(`(?i)\b(weather|temperature|high t
 
 type httpStatusError struct {
 	status int
+	body   string
 }
 
 func (e *httpStatusError) Error() string {
-	return fmt.Sprintf("http status: %d", e.status)
+	if e.body == "" {
+		return fmt.Sprintf("http status: %d", e.status)
+	}
+	return fmt.Sprintf("http status: %d body=%s", e.status, e.body)
 }
 
 func NewGammaClient(baseURL string, client *http.Client) *GammaClient {
@@ -67,6 +72,44 @@ func (c *GammaClient) ListMarkets(ctx context.Context, weatherTag string, active
 }
 
 func (c *GammaClient) listMarkets(ctx context.Context, weatherTag string, activeOnly bool, limit int) ([]GammaMarket, error) {
+	const maxPages = 100
+	offset := 0
+	seen := make(map[string]struct{})
+	all := make([]GammaMarket, 0, limit)
+
+	for page := 0; page < maxPages; page++ {
+		rows, err := c.requestMarketsPage(ctx, weatherTag, activeOnly, limit, offset)
+		if err != nil {
+			return nil, err
+		}
+		if len(rows) == 0 {
+			break
+		}
+
+		pageAdded := 0
+		for _, row := range rows {
+			parsed := parseGammaMarket(row)
+			if parsed.PolymarketID == "" || parsed.Question == "" {
+				continue
+			}
+			if _, exists := seen[parsed.PolymarketID]; exists {
+				continue
+			}
+			seen[parsed.PolymarketID] = struct{}{}
+			all = append(all, parsed)
+			pageAdded++
+		}
+
+		if len(rows) < limit || pageAdded == 0 {
+			break
+		}
+		offset += limit
+	}
+
+	return all, nil
+}
+
+func (c *GammaClient) requestMarketsPage(ctx context.Context, weatherTag string, activeOnly bool, limit int, offset int) ([]map[string]any, error) {
 	u, err := url.Parse(c.baseURL + "/markets")
 	if err != nil {
 		return nil, fmt.Errorf("parse gamma url: %w", err)
@@ -76,48 +119,37 @@ func (c *GammaClient) listMarkets(ctx context.Context, weatherTag string, active
 		q.Set("tag_id", weatherTag)
 	}
 	q.Set("limit", strconv.Itoa(limit))
+	q.Set("offset", strconv.Itoa(offset))
 	q.Set("closed", "false")
 	if activeOnly {
 		q.Set("active", "true")
 	}
 	u.RawQuery = q.Encode()
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
-	if err != nil {
-		return nil, fmt.Errorf("build gamma request: %w", err)
-	}
-	req.Header.Set("Accept", "application/json")
-	req.Header.Set("User-Agent", "sky-alpha-pro/0.1.0")
-
-	resp, err := c.client.Do(req)
+	resp, err := doRequestWithRetry(ctx, c.client, func() (*http.Request, error) {
+		req, buildErr := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
+		if buildErr != nil {
+			return nil, fmt.Errorf("build gamma request: %w", buildErr)
+		}
+		req.Header.Set("Accept", "application/json")
+		req.Header.Set("User-Agent", "sky-alpha-pro/0.1.0")
+		return req, nil
+	}, 3)
 	if err != nil {
 		return nil, fmt.Errorf("request gamma markets: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, &httpStatusError{status: resp.StatusCode}
+		bodyBytes, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
+		return nil, &httpStatusError{status: resp.StatusCode, body: string(bodyBytes)}
 	}
 
 	var payload any
 	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
 		return nil, fmt.Errorf("decode gamma markets: %w", err)
 	}
-
-	rows, err := extractMarketRows(payload)
-	if err != nil {
-		return nil, err
-	}
-
-	markets := make([]GammaMarket, 0, len(rows))
-	for _, row := range rows {
-		parsed := parseGammaMarket(row)
-		if parsed.PolymarketID == "" || parsed.Question == "" {
-			continue
-		}
-		markets = append(markets, parsed)
-	}
-	return markets, nil
+	return extractMarketRows(payload)
 }
 
 func looksLikeWeatherMarket(m GammaMarket) bool {
@@ -166,6 +198,7 @@ func parseGammaMarket(row map[string]any) GammaMarket {
 		IsResolved:   firstBool(row, false, "resolved", "isResolved", "closed"),
 		Resolution:   strings.ToUpper(firstString(row, "resolution")),
 		VolumeTotal:  firstFloat(row, "volume", "volumeTotal"),
+		Volume24h:    firstFloat(row, "volume24hr", "volume24h", "volume_24h"),
 		Liquidity:    firstFloat(row, "liquidity"),
 	}
 

@@ -28,6 +28,9 @@ func newServeCmd() *cobra.Command {
 				return err
 			}
 			defer database.Close(db)
+			if err := database.AutoMigrate(db); err != nil {
+				return err
+			}
 
 			handler := server.NewRouter(appConfig, appLogger, db)
 			httpServer := &http.Server{

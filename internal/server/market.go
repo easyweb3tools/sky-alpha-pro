@@ -3,11 +3,14 @@ package server
 import (
 	"net/http"
 	"strconv"
+	"sync"
 
 	"github.com/gin-gonic/gin"
 
 	"sky-alpha-pro/internal/market"
 )
+
+var marketSyncMu sync.Mutex
 
 func ListMarketsHandler(svc *market.Service) gin.HandlerFunc {
 	return func(c *gin.Context) {
@@ -38,6 +41,7 @@ func ListMarketsHandler(svc *market.Service) gin.HandlerFunc {
 		items, err := svc.ListMarketSnapshots(c.Request.Context(), market.ListOptions{
 			ActiveOnly: activeOnly,
 			City:       c.Query("city"),
+			MarketType: c.Query("type"),
 			Limit:      limit,
 		})
 		if err != nil {
@@ -56,6 +60,14 @@ func ListMarketsHandler(svc *market.Service) gin.HandlerFunc {
 
 func SyncMarketsHandler(svc *market.Service) gin.HandlerFunc {
 	return func(c *gin.Context) {
+		if !marketSyncMu.TryLock() {
+			c.JSON(http.StatusConflict, gin.H{
+				"error": gin.H{"code": "SYNC_RUNNING", "message": "market sync already running"},
+			})
+			return
+		}
+		defer marketSyncMu.Unlock()
+
 		result, err := svc.SyncMarkets(c.Request.Context())
 		if err != nil {
 			c.JSON(http.StatusBadGateway, gin.H{
