@@ -9,25 +9,33 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"sky-alpha-pro/pkg/httpretry"
 )
 
 type OpenMeteoClient struct {
 	baseURL      string
 	geocodingURL string
 	client       *http.Client
+	models       string
 }
 
-func NewOpenMeteoClient(baseURL string, geocodingURL string, client *http.Client) *OpenMeteoClient {
+func NewOpenMeteoClient(baseURL string, geocodingURL string, models string, client *http.Client) *OpenMeteoClient {
 	return &OpenMeteoClient{
 		baseURL:      strings.TrimRight(baseURL, "/"),
 		geocodingURL: strings.TrimRight(geocodingURL, "/"),
 		client:       client,
+		models:       strings.TrimSpace(models),
 	}
 }
 
 func (c *OpenMeteoClient) ResolveCoordinates(ctx context.Context, location string) (float64, float64, string, error) {
 	if lat, lon, ok := parseLatLon(location); ok {
-		return lat, lon, location, nil
+		name, err := c.reverseGeocode(ctx, lat, lon)
+		if err == nil && name != "" {
+			return lat, lon, name, nil
+		}
+		return lat, lon, fmt.Sprintf("%.4f,%.4f", lat, lon), nil
 	}
 
 	u, err := url.Parse(c.geocodingURL + "/v1/search")
@@ -40,11 +48,9 @@ func (c *OpenMeteoClient) ResolveCoordinates(ctx context.Context, location strin
 	q.Set("language", "en")
 	u.RawQuery = q.Encode()
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
-	if err != nil {
-		return 0, 0, "", err
-	}
-	resp, err := c.client.Do(req)
+	resp, err := httpretry.DoRequestWithRetry(ctx, c.client, func() (*http.Request, error) {
+		return http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
+	}, 3)
 	if err != nil {
 		return 0, 0, "", err
 	}
@@ -96,13 +102,14 @@ func (c *OpenMeteoClient) GetDailyForecast(ctx context.Context, lat, lon float64
 	q.Set("precipitation_unit", "inch")
 	q.Set("timezone", "UTC")
 	q.Set("forecast_days", strconv.Itoa(days))
+	if c.models != "" {
+		q.Set("models", c.models)
+	}
 	u.RawQuery = q.Encode()
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
-	if err != nil {
-		return nil, err
-	}
-	resp, err := c.client.Do(req)
+	resp, err := httpretry.DoRequestWithRetry(ctx, c.client, func() (*http.Request, error) {
+		return http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
+	}, 3)
 	if err != nil {
 		return nil, err
 	}
@@ -151,6 +158,48 @@ func (c *OpenMeteoClient) GetDailyForecast(ctx context.Context, lat, lon float64
 	return items, nil
 }
 
+func (c *OpenMeteoClient) reverseGeocode(ctx context.Context, lat, lon float64) (string, error) {
+	u, err := url.Parse(c.geocodingURL + "/v1/reverse")
+	if err != nil {
+		return "", err
+	}
+	q := u.Query()
+	q.Set("latitude", strconv.FormatFloat(lat, 'f', 4, 64))
+	q.Set("longitude", strconv.FormatFloat(lon, 'f', 4, 64))
+	q.Set("count", "1")
+	q.Set("language", "en")
+	u.RawQuery = q.Encode()
+
+	resp, err := httpretry.DoRequestWithRetry(ctx, c.client, func() (*http.Request, error) {
+		return http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
+	}, 3)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return "", fmt.Errorf("open-meteo reverse status: %d", resp.StatusCode)
+	}
+
+	var payload struct {
+		Results []struct {
+			Name    string `json:"name"`
+			Country string `json:"country"`
+		} `json:"results"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+		return "", err
+	}
+	if len(payload.Results) == 0 {
+		return "", nil
+	}
+	name := payload.Results[0].Name
+	if payload.Results[0].Country != "" {
+		name += ", " + payload.Results[0].Country
+	}
+	return name, nil
+}
+
 func parseLatLon(location string) (float64, float64, bool) {
 	parts := strings.Split(strings.TrimSpace(location), ",")
 	if len(parts) != 2 {
@@ -159,6 +208,9 @@ func parseLatLon(location string) (float64, float64, bool) {
 	lat, err1 := strconv.ParseFloat(strings.TrimSpace(parts[0]), 64)
 	lon, err2 := strconv.ParseFloat(strings.TrimSpace(parts[1]), 64)
 	if err1 != nil || err2 != nil {
+		return 0, 0, false
+	}
+	if lat < -90 || lat > 90 || lon < -180 || lon > 180 {
 		return 0, 0, false
 	}
 	return lat, lon, true

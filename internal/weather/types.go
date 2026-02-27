@@ -37,5 +37,8 @@ type Observation struct {
 	HumidityPct  int       `json:"humidity_pct,omitempty"`
 	WindSpeedMPH float64   `json:"wind_speed_mph,omitempty"`
 	WindDir      string    `json:"wind_dir,omitempty"`
+	PressureMB   float64   `json:"pressure_mb,omitempty"`
+	Precip1hIn   float64   `json:"precip_1h_in,omitempty"`
+	VisibilityMi float64   `json:"visibility_mi,omitempty"`
 	Description  string    `json:"description,omitempty"`
 }

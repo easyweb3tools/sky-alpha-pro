@@ -57,6 +57,7 @@ type WeatherConfig struct {
 	NWSBaseURL                string        `mapstructure:"nws_base_url"`
 	OpenMeteoBaseURL          string        `mapstructure:"openmeteo_base_url"`
 	OpenMeteoGeocodingBaseURL string        `mapstructure:"openmeteo_geocoding_base_url"`
+	OpenMeteoModels           string        `mapstructure:"openmeteo_models"`
 	VisualCrossingBaseURL     string        `mapstructure:"visualcrossing_base_url"`
 	VisualCrossingAPIKey      string        `mapstructure:"visualcrossing_api_key"`
 	RequestTimeout            time.Duration `mapstructure:"request_timeout"`
@@ -121,6 +122,7 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("weather.nws_base_url", "https://api.weather.gov")
 	v.SetDefault("weather.openmeteo_base_url", "https://api.open-meteo.com")
 	v.SetDefault("weather.openmeteo_geocoding_base_url", "https://geocoding-api.open-meteo.com")
+	v.SetDefault("weather.openmeteo_models", "")
 	v.SetDefault("weather.visualcrossing_base_url", "https://weather.visualcrossing.com")
 	v.SetDefault("weather.visualcrossing_api_key", "")
 	v.SetDefault("weather.request_timeout", "12s")

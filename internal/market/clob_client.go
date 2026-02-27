@@ -7,6 +7,8 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+
+	"sky-alpha-pro/pkg/httpretry"
 )
 
 type CLOBClient struct {
@@ -36,7 +38,7 @@ func (c *CLOBClient) GetSpread(ctx context.Context, tokenID string) (float64, er
 }
 
 func (c *CLOBClient) getNumber(ctx context.Context, path string, keys []string) (float64, error) {
-	resp, err := doRequestWithRetry(ctx, c.client, func() (*http.Request, error) {
+	resp, err := httpretry.DoRequestWithRetry(ctx, c.client, func() (*http.Request, error) {
 		req, buildErr := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+path, nil)
 		if buildErr != nil {
 			return nil, fmt.Errorf("build clob request: %w", buildErr)

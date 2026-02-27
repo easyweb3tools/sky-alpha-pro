@@ -9,6 +9,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"sky-alpha-pro/pkg/httpretry"
 )
 
 type VisualCrossingClient struct {
@@ -37,7 +39,7 @@ func (c *VisualCrossingClient) GetDailyForecast(ctx context.Context, location st
 		days = 1
 	}
 
-	pathLocation := strings.ReplaceAll(strings.TrimSpace(location), " ", "%20")
+	pathLocation := url.PathEscape(strings.TrimSpace(location))
 	u, err := url.Parse(fmt.Sprintf("%s/VisualCrossingWebServices/rest/services/timeline/%s", c.baseURL, pathLocation))
 	if err != nil {
 		return nil, err
@@ -51,11 +53,9 @@ func (c *VisualCrossingClient) GetDailyForecast(ctx context.Context, location st
 	q.Set("forecastDays", strconv.Itoa(days))
 	u.RawQuery = q.Encode()
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
-	if err != nil {
-		return nil, err
-	}
-	resp, err := c.client.Do(req)
+	resp, err := httpretry.DoRequestWithRetry(ctx, c.client, func() (*http.Request, error) {
+		return http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
+	}, 3)
 	if err != nil {
 		return nil, err
 	}

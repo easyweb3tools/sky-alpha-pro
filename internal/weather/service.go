@@ -5,10 +5,13 @@ import (
 	"net/http"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"go.uber.org/zap"
+	"golang.org/x/sync/errgroup"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 
 	"sky-alpha-pro/internal/model"
 	"sky-alpha-pro/pkg/config"
@@ -29,7 +32,7 @@ func NewService(cfg config.WeatherConfig, db *gorm.DB, log *zap.Logger) *Service
 		cfg:            cfg,
 		db:             db,
 		log:            log,
-		openMeteo:      NewOpenMeteoClient(cfg.OpenMeteoBaseURL, cfg.OpenMeteoGeocodingBaseURL, httpClient),
+		openMeteo:      NewOpenMeteoClient(cfg.OpenMeteoBaseURL, cfg.OpenMeteoGeocodingBaseURL, cfg.OpenMeteoModels, httpClient),
 		nws:            NewNWSClient(cfg.NWSBaseURL, cfg.UserAgent, httpClient),
 		visualCrossing: NewVisualCrossingClient(cfg.VisualCrossingBaseURL, cfg.VisualCrossingAPIKey, httpClient),
 	}
@@ -57,39 +60,56 @@ func (s *Service) GetForecast(ctx context.Context, req ForecastRequest) (*Foreca
 	}
 
 	sources := normalizeSources(req.Source)
+	var mu sync.Mutex
+	g, gctx := errgroup.WithContext(ctx)
+	g.SetLimit(3)
+
 	for _, source := range sources {
-		switch source {
-		case "openmeteo":
-			items, err := s.openMeteo.GetDailyForecast(ctx, lat, lon, days)
-			if err != nil {
-				response.Errors = append(response.Errors, "openmeteo: "+err.Error())
-				continue
+		source := source
+		g.Go(func() error {
+			switch source {
+			case "openmeteo":
+				items, e := s.openMeteo.GetDailyForecast(gctx, lat, lon, days)
+				mu.Lock()
+				defer mu.Unlock()
+				if e != nil {
+					response.Errors = append(response.Errors, "openmeteo: "+e.Error())
+					return nil
+				}
+				for _, item := range items {
+					item.Location = normalizedLocation
+					response.Forecasts = append(response.Forecasts, item)
+				}
+			case "nws":
+				items, e := s.nws.GetDailyForecast(gctx, lat, lon, days)
+				mu.Lock()
+				defer mu.Unlock()
+				if e != nil {
+					response.Errors = append(response.Errors, "nws: "+e.Error())
+					return nil
+				}
+				for _, item := range items {
+					item.Location = normalizedLocation
+					response.Forecasts = append(response.Forecasts, item)
+				}
+			case "visualcrossing":
+				items, e := s.visualCrossing.GetDailyForecast(gctx, req.Location, days)
+				mu.Lock()
+				defer mu.Unlock()
+				if e != nil {
+					response.Errors = append(response.Errors, "visualcrossing: "+e.Error())
+					return nil
+				}
+				for _, item := range items {
+					item.Location = normalizedLocation
+					response.Forecasts = append(response.Forecasts, item)
+				}
 			}
-			for _, item := range items {
-				item.Location = normalizedLocation
-				response.Forecasts = append(response.Forecasts, item)
-			}
-		case "nws":
-			items, err := s.nws.GetDailyForecast(ctx, lat, lon, days)
-			if err != nil {
-				response.Errors = append(response.Errors, "nws: "+err.Error())
-				continue
-			}
-			for _, item := range items {
-				item.Location = normalizedLocation
-				response.Forecasts = append(response.Forecasts, item)
-			}
-		case "visualcrossing":
-			items, err := s.visualCrossing.GetDailyForecast(ctx, req.Location, days)
-			if err != nil {
-				response.Errors = append(response.Errors, "visualcrossing: "+err.Error())
-				continue
-			}
-			for _, item := range items {
-				item.Location = normalizedLocation
-				response.Forecasts = append(response.Forecasts, item)
-			}
-		}
+			return nil
+		})
+	}
+	if err := g.Wait(); err != nil {
+		return nil, err
 	}
 
 	sort.Slice(response.Forecasts, func(i, j int) bool {
@@ -121,9 +141,12 @@ func (s *Service) persistForecasts(ctx context.Context, forecasts []ForecastEntr
 	if len(forecasts) == 0 {
 		return nil
 	}
-	rows := make([]model.Forecast, 0, len(forecasts))
+	now := time.Now().UTC()
+	todayUTC := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC)
+
 	for _, f := range forecasts {
-		rows = append(rows, model.Forecast{
+		lead := int(f.ForecastDate.UTC().Sub(todayUTC).Hours() / 24)
+		row := model.Forecast{
 			MarketID:      nil,
 			StationID:     "",
 			Location:      f.Location,
@@ -136,10 +159,33 @@ func (s *Service) persistForecasts(ctx context.Context, forecasts []ForecastEntr
 			WindGustMPH:   f.WindGustMPH,
 			CloudCoverPct: f.CloudCover,
 			HumidityPct:   f.HumidityPct,
-			FetchedAt:     time.Now().UTC(),
-		})
+			LeadDays:      lead,
+			FetchedAt:     now,
+		}
+		if err := s.db.WithContext(ctx).
+			Clauses(clause.OnConflict{
+				Columns: []clause.Column{
+					{Name: "location"},
+					{Name: "forecast_date"},
+					{Name: "source"},
+				},
+				DoUpdates: clause.Assignments(map[string]any{
+					"temp_high_f":     row.TempHighF,
+					"temp_low_f":      row.TempLowF,
+					"precip_in":       row.PrecipIn,
+					"wind_speed_mph":  row.WindSpeedMPH,
+					"wind_gust_mph":   row.WindGustMPH,
+					"cloud_cover_pct": row.CloudCoverPct,
+					"humidity_pct":    row.HumidityPct,
+					"lead_days":       row.LeadDays,
+					"fetched_at":      row.FetchedAt,
+				}),
+			}).
+			Create(&row).Error; err != nil {
+			return err
+		}
 	}
-	return s.db.WithContext(ctx).Create(&rows).Error
+	return nil
 }
 
 func (s *Service) persistObservation(ctx context.Context, obs *Observation) error {
@@ -153,6 +199,9 @@ func (s *Service) persistObservation(ctx context.Context, obs *Observation) erro
 		HumidityPct:  obs.HumidityPct,
 		WindSpeedMPH: obs.WindSpeedMPH,
 		WindDir:      obs.WindDir,
+		PressureMB:   obs.PressureMB,
+		Precip1hIn:   obs.Precip1hIn,
+		VisibilityMi: obs.VisibilityMi,
 		Description:  obs.Description,
 		FetchedAt:    time.Now().UTC(),
 	}

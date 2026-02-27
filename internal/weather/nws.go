@@ -5,8 +5,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
+
+	"sky-alpha-pro/pkg/httpretry"
 )
 
 type NWSClient struct {
@@ -25,25 +28,16 @@ func NewNWSClient(baseURL string, userAgent string, client *http.Client) *NWSCli
 
 func (c *NWSClient) GetDailyForecast(ctx context.Context, lat, lon float64, days int) ([]ForecastEntry, error) {
 	pointURL := fmt.Sprintf("%s/points/%.4f,%.4f", c.baseURL, lat, lon)
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, pointURL, nil)
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("User-Agent", c.userAgent)
-	req.Header.Set("Accept", "application/geo+json")
-
-	resp, err := c.client.Do(req)
+	resp, err := c.requestGeoJSON(ctx, pointURL)
 	if err != nil {
 		return nil, err
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("nws points status: %d", resp.StatusCode)
-	}
 
 	var points struct {
 		Properties struct {
 			ForecastHourly string `json:"forecastHourly"`
+			TimeZone       string `json:"timeZone"`
 		} `json:"properties"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&points); err != nil {
@@ -52,22 +46,15 @@ func (c *NWSClient) GetDailyForecast(ctx context.Context, lat, lon float64, days
 	if points.Properties.ForecastHourly == "" {
 		return nil, fmt.Errorf("nws forecast url missing")
 	}
-
-	req2, err := http.NewRequestWithContext(ctx, http.MethodGet, points.Properties.ForecastHourly, nil)
-	if err != nil {
-		return nil, err
+	if !isSafeNWSURL(c.baseURL, points.Properties.ForecastHourly) {
+		return nil, fmt.Errorf("nws forecast url is unsafe")
 	}
-	req2.Header.Set("User-Agent", c.userAgent)
-	req2.Header.Set("Accept", "application/geo+json")
 
-	resp2, err := c.client.Do(req2)
+	resp2, err := c.requestGeoJSON(ctx, points.Properties.ForecastHourly)
 	if err != nil {
 		return nil, err
 	}
 	defer resp2.Body.Close()
-	if resp2.StatusCode < 200 || resp2.StatusCode >= 300 {
-		return nil, fmt.Errorf("nws hourly status: %d", resp2.StatusCode)
-	}
 
 	var hourly struct {
 		Properties struct {
@@ -86,6 +73,10 @@ func (c *NWSClient) GetDailyForecast(ctx context.Context, lat, lon float64, days
 		return nil, nil
 	}
 
+	localStandard := mustStandardLocation(points.Properties.TimeZone)
+	nowLocal := time.Now().In(localStandard)
+	todayKey := nowLocal.Format("2006-01-02")
+
 	type agg struct {
 		high float64
 		low  float64
@@ -98,7 +89,8 @@ func (c *NWSClient) GetDailyForecast(ctx context.Context, lat, lon float64, days
 		if err != nil {
 			continue
 		}
-		key := t.UTC().Format("2006-01-02")
+		local := t.In(localStandard)
+		key := local.Format("2006-01-02")
 		tempF := p.Temp
 		if strings.EqualFold(p.TempUnit, "C") {
 			tempF = celsiusToFahrenheit(p.Temp)
@@ -121,7 +113,8 @@ func (c *NWSClient) GetDailyForecast(ctx context.Context, lat, lon float64, days
 
 	out := make([]ForecastEntry, 0, len(byDay))
 	for i := 0; i < days; i++ {
-		day := time.Now().UTC().Add(time.Duration(i) * 24 * time.Hour).Format("2006-01-02")
+		dayTime, _ := time.ParseInLocation("2006-01-02", todayKey, localStandard)
+		day := dayTime.AddDate(0, 0, i).Format("2006-01-02")
 		dayAgg, ok := byDay[day]
 		if !ok {
 			continue
@@ -143,21 +136,11 @@ func (c *NWSClient) GetDailyForecast(ctx context.Context, lat, lon float64, days
 
 func (c *NWSClient) GetLatestObservation(ctx context.Context, stationID string) (*Observation, error) {
 	u := fmt.Sprintf("%s/stations/%s/observations/latest", c.baseURL, stationID)
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("User-Agent", c.userAgent)
-	req.Header.Set("Accept", "application/geo+json")
-
-	resp, err := c.client.Do(req)
+	resp, err := c.requestGeoJSON(ctx, u)
 	if err != nil {
 		return nil, err
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("nws observation status: %d", resp.StatusCode)
-	}
 
 	var payload struct {
 		Properties struct {
@@ -175,6 +158,15 @@ func (c *NWSClient) GetLatestObservation(ctx context.Context, stationID string) 
 			WindDirection struct {
 				Value *float64 `json:"value"`
 			} `json:"windDirection"`
+			BarometricPressure struct {
+				Value *float64 `json:"value"`
+			} `json:"barometricPressure"`
+			PrecipLastHour struct {
+				Value *float64 `json:"value"`
+			} `json:"precipitationLastHour"`
+			Visibility struct {
+				Value *float64 `json:"value"`
+			} `json:"visibility"`
 		} `json:"properties"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
@@ -194,20 +186,96 @@ func (c *NWSClient) GetLatestObservation(ctx context.Context, stationID string) 
 		item.HumidityPct = int(*payload.Properties.RelativeHumidity.Value)
 	}
 	if payload.Properties.WindSpeed.Value != nil {
-		item.WindSpeedMPH = metersPerSecondToMPH(*payload.Properties.WindSpeed.Value)
+		item.WindSpeedMPH = kilometersPerHourToMPH(*payload.Properties.WindSpeed.Value)
 	}
 	if payload.Properties.WindDirection.Value != nil {
 		item.WindDir = degreeToDirection(*payload.Properties.WindDirection.Value)
 	}
+	if payload.Properties.BarometricPressure.Value != nil {
+		item.PressureMB = pascalToMillibar(*payload.Properties.BarometricPressure.Value)
+	}
+	if payload.Properties.PrecipLastHour.Value != nil {
+		item.Precip1hIn = millimeterToInch(*payload.Properties.PrecipLastHour.Value)
+	}
+	if payload.Properties.Visibility.Value != nil {
+		item.VisibilityMi = metersToMile(*payload.Properties.Visibility.Value)
+	}
 	return item, nil
+}
+
+func (c *NWSClient) requestGeoJSON(ctx context.Context, endpoint string) (*http.Response, error) {
+	resp, err := httpretry.DoRequestWithRetry(ctx, c.client, func() (*http.Request, error) {
+		req, buildErr := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+		if buildErr != nil {
+			return nil, buildErr
+		}
+		req.Header.Set("User-Agent", c.userAgent)
+		req.Header.Set("Accept", "application/geo+json")
+		return req, nil
+	}, 3)
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		defer resp.Body.Close()
+		return nil, fmt.Errorf("nws status: %d", resp.StatusCode)
+	}
+	return resp, nil
+}
+
+func mustStandardLocation(zone string) *time.Location {
+	loc, err := time.LoadLocation(zone)
+	if err != nil {
+		return time.UTC
+	}
+	year := time.Now().Year()
+	for m := 1; m <= 12; m++ {
+		t := time.Date(year, time.Month(m), 1, 12, 0, 0, 0, loc)
+		if !t.IsDST() {
+			_, offset := t.Zone()
+			return time.FixedZone(zone+"_standard", offset)
+		}
+	}
+	_, offset := time.Now().In(loc).Zone()
+	return time.FixedZone(zone+"_standard", offset)
+}
+
+func isSafeNWSURL(baseURL string, raw string) bool {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return false
+	}
+	if !strings.EqualFold(u.Scheme, "https") && !strings.EqualFold(u.Scheme, "http") {
+		return false
+	}
+	if strings.EqualFold(u.Host, "api.weather.gov") {
+		return true
+	}
+	base, err := url.Parse(baseURL)
+	if err != nil {
+		return false
+	}
+	return strings.EqualFold(u.Host, base.Host)
 }
 
 func celsiusToFahrenheit(v float64) float64 {
 	return (v * 9.0 / 5.0) + 32.0
 }
 
-func metersPerSecondToMPH(v float64) float64 {
-	return v * 2.236936
+func kilometersPerHourToMPH(v float64) float64 {
+	return v * 0.621371
+}
+
+func pascalToMillibar(v float64) float64 {
+	return v / 100.0
+}
+
+func millimeterToInch(v float64) float64 {
+	return v / 25.4
+}
+
+func metersToMile(v float64) float64 {
+	return v / 1609.344
 }
 
 func degreeToDirection(deg float64) string {
@@ -217,14 +285,16 @@ func degreeToDirection(deg float64) string {
 }
 
 func parseWindSpeedMPH(v string) float64 {
-	var n float64
-	_, err := fmt.Sscanf(strings.TrimSpace(v), "%f mph", &n)
-	if err == nil {
-		return n
+	var a float64
+	var b float64
+	if _, err := fmt.Sscanf(strings.TrimSpace(v), "%f to %f mph", &a, &b); err == nil {
+		return (a + b) / 2.0
 	}
-	_, err = fmt.Sscanf(strings.TrimSpace(v), "%f", &n)
-	if err == nil {
-		return n
+	if _, err := fmt.Sscanf(strings.TrimSpace(v), "%f mph", &a); err == nil {
+		return a
+	}
+	if _, err := fmt.Sscanf(strings.TrimSpace(v), "%f", &a); err == nil {
+		return a
 	}
 	return 0
 }

@@ -12,6 +12,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"sky-alpha-pro/pkg/httpretry"
 )
 
 type GammaClient struct {
@@ -126,7 +128,7 @@ func (c *GammaClient) requestMarketsPage(ctx context.Context, weatherTag string,
 	}
 	u.RawQuery = q.Encode()
 
-	resp, err := doRequestWithRetry(ctx, c.client, func() (*http.Request, error) {
+	resp, err := httpretry.DoRequestWithRetry(ctx, c.client, func() (*http.Request, error) {
 		req, buildErr := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
 		if buildErr != nil {
 			return nil, fmt.Errorf("build gamma request: %w", buildErr)

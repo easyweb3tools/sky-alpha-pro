@@ -14,7 +14,7 @@ func TestOpenMeteoResolveCoordinates(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	client := NewOpenMeteoClient(srv.URL, srv.URL, &http.Client{Timeout: 2 * time.Second})
+	client := NewOpenMeteoClient(srv.URL, srv.URL, "", &http.Client{Timeout: 2 * time.Second})
 	lat, lon, name, err := client.ResolveCoordinates(context.Background(), "New York")
 	if err != nil {
 		t.Fatalf("ResolveCoordinates error: %v", err)
@@ -24,6 +24,15 @@ func TestOpenMeteoResolveCoordinates(t *testing.T) {
 	}
 	if name == "" {
 		t.Fatal("empty normalized name")
+	}
+}
+
+func TestParseLatLonRange(t *testing.T) {
+	if _, _, ok := parseLatLon("123,45"); ok {
+		t.Fatal("expected invalid latitude out of range")
+	}
+	if _, _, ok := parseLatLon("40.7,-74.0"); !ok {
+		t.Fatal("expected valid coordinates")
 	}
 }
 

@@ -48,9 +48,9 @@ type Forecast struct {
 	ID            uint64         `gorm:"column:id;primaryKey;autoIncrement"`
 	MarketID      *string        `gorm:"column:market_id;type:uuid;index:idx_forecasts_market,priority:1"`
 	StationID     string         `gorm:"column:station_id;size:20;index:idx_forecasts_station_date,priority:1"`
-	Location      string         `gorm:"column:location;size:255;not null"`
-	ForecastDate  time.Time      `gorm:"column:forecast_date;type:date;not null;index:idx_forecasts_station_date,priority:2"`
-	Source        string         `gorm:"column:source;size:30;not null;index:idx_forecasts_market,priority:2"`
+	Location      string         `gorm:"column:location;size:255;not null;uniqueIndex:idx_forecasts_unique,priority:1"`
+	ForecastDate  time.Time      `gorm:"column:forecast_date;type:date;not null;index:idx_forecasts_station_date,priority:2;uniqueIndex:idx_forecasts_unique,priority:2"`
+	Source        string         `gorm:"column:source;size:30;not null;index:idx_forecasts_market,priority:2;uniqueIndex:idx_forecasts_unique,priority:3"`
 	TempHighF     float64        `gorm:"column:temp_high_f;type:decimal(5,1)"`
 	TempLowF      float64        `gorm:"column:temp_low_f;type:decimal(5,1)"`
 	PrecipIn      float64        `gorm:"column:precip_in;type:decimal(6,2)"`

@@ -1,4 +1,4 @@
-package market
+package httpretry
 
 import (
 	"context"
@@ -8,7 +8,7 @@ import (
 	"time"
 )
 
-func doRequestWithRetry(ctx context.Context, client *http.Client, reqFactory func() (*http.Request, error), maxAttempts int) (*http.Response, error) {
+func DoRequestWithRetry(ctx context.Context, client *http.Client, reqFactory func() (*http.Request, error), maxAttempts int) (*http.Response, error) {
 	if maxAttempts < 1 {
 		maxAttempts = 1
 	}
@@ -38,6 +38,7 @@ func doRequestWithRetry(ctx context.Context, client *http.Client, reqFactory fun
 			return nil, ctx.Err()
 		case <-time.After(backoff):
 		}
+
 		backoff *= 2
 		if backoff > 3*time.Second {
 			backoff = 3 * time.Second
