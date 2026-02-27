@@ -1,0 +1,41 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: sky-alpha-postgres
+    environment:
+      POSTGRES_DB: sky_alpha_pro
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d sky_alpha_pro"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        APP_VERSION: ${APP_VERSION:-1.0.0-local}
+    container_name: sky-alpha-pro
+    environment:
+      SKY_ALPHA_APP_ENV: dev
+      SKY_ALPHA_DATABASE_HOST: postgres
+      SKY_ALPHA_DATABASE_PORT: 5432
+      SKY_ALPHA_DATABASE_USER: postgres
+      SKY_ALPHA_DATABASE_PASSWORD: postgres
+      SKY_ALPHA_DATABASE_NAME: sky_alpha_pro
+      SKY_ALPHA_DATABASE_SSLMODE: disable
+      SKY_ALPHA_DATABASE_TIMEZONE: UTC
+    depends_on:
+      postgres:
+        condition: service_healthy
+    command: ["db", "migrate", "--config", "/app/configs/config.yaml"]
+
+volumes:
+  pg_data:

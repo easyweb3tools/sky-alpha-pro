@@ -1,0 +1,19 @@
+app:
+  name: sky-alpha-pro
+  env: dev
+  version: 0.1.0
+
+database:
+  host: 127.0.0.1
+  port: 5432
+  user: postgres
+  password: postgres
+  name: sky_alpha_pro
+  sslmode: disable
+  timezone: UTC
+  max_open_conns: 25
+  max_idle_conns: 5
+
+log:
+  level: info
+  encoding: console
