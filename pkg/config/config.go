@@ -4,12 +4,14 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/spf13/viper"
 )
 
 type Config struct {
 	App      AppConfig      `mapstructure:"app"`
+	Server   ServerConfig   `mapstructure:"server"`
 	Database DatabaseConfig `mapstructure:"database"`
 	Log      LogConfig      `mapstructure:"log"`
 }
@@ -18,6 +20,15 @@ type AppConfig struct {
 	Name    string `mapstructure:"name"`
 	Env     string `mapstructure:"env"`
 	Version string `mapstructure:"version"`
+}
+
+type ServerConfig struct {
+	Host              string        `mapstructure:"host"`
+	Port              int           `mapstructure:"port"`
+	ReadTimeout       time.Duration `mapstructure:"read_timeout"`
+	ReadHeaderTimeout time.Duration `mapstructure:"read_header_timeout"`
+	WriteTimeout      time.Duration `mapstructure:"write_timeout"`
+	ShutdownTimeout   time.Duration `mapstructure:"shutdown_timeout"`
 }
 
 type DatabaseConfig struct {
@@ -73,6 +84,13 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("app.name", "sky-alpha-pro")
 	v.SetDefault("app.env", "dev")
 	v.SetDefault("app.version", "0.1.0")
+
+	v.SetDefault("server.host", "0.0.0.0")
+	v.SetDefault("server.port", 8080)
+	v.SetDefault("server.read_timeout", "10s")
+	v.SetDefault("server.read_header_timeout", "5s")
+	v.SetDefault("server.write_timeout", "15s")
+	v.SetDefault("server.shutdown_timeout", "10s")
 
 	v.SetDefault("database.host", "127.0.0.1")
 	v.SetDefault("database.port", 5432)

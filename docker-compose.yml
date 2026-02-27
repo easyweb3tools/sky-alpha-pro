@@ -35,7 +35,9 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
-    command: ["db", "migrate", "--config", "/app/configs/config.yaml"]
+    ports:
+      - "8080:8080"
+    command: ["serve", "--config", "/app/configs/config.yaml"]
 
 volumes:
   pg_data:

@@ -8,6 +8,12 @@ Week 1 bootstrap for the MVP backend:
 - PostgreSQL connection (`gorm`)
 - schema management via GORM `AutoMigrate`
 
+Week 2 delivery:
+
+- API server entry command: `serve`
+- health check endpoint: `GET /health` and `GET /api/v1/health`
+- request logging middleware (method/path/status/latency/ip/user-agent)
+
 ## MVP Database Rule
 
 MVP 阶段数据库表结构统一由 GORM `AutoMigrate` 管理：
@@ -28,6 +34,21 @@ make run
 
 ```bash
 make db-migrate
+```
+
+## API Health Check
+
+Start server:
+
+```bash
+go run ./cmd/sky-alpha-pro serve --config ./configs/config.yaml
+```
+
+Check health:
+
+```bash
+curl http://127.0.0.1:8080/health
+curl http://127.0.0.1:8080/api/v1/health
 ```
 
 ## Container

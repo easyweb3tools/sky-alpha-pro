@@ -21,4 +21,4 @@ ARG APP_VERSION=dev
 ENV SKY_ALPHA_APP_VERSION=${APP_VERSION}
 
 ENTRYPOINT ["sky-alpha-pro"]
-CMD ["version", "--config", "/app/configs/config.yaml"]
+CMD ["serve", "--config", "/app/configs/config.yaml"]

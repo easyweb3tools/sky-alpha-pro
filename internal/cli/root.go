@@ -59,6 +59,7 @@ func init() {
 
 	rootCmd.AddCommand(newVersionCmd())
 	rootCmd.AddCommand(newDBCmd())
+	rootCmd.AddCommand(newServeCmd())
 }
 
 func Execute() error {

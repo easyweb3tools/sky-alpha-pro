@@ -12,7 +12,7 @@ test:
 	go test ./...
 
 run:
-	go run ./cmd/sky-alpha-pro version
+	go run ./cmd/sky-alpha-pro serve --config ./configs/config.yaml
 
 db-migrate:
 	go run ./cmd/sky-alpha-pro db migrate --config ./configs/config.yaml
