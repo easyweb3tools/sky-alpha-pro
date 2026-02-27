@@ -18,6 +18,15 @@ market:
   sync_limit: 100
   request_timeout: 12s
 
+weather:
+  nws_base_url: https://api.weather.gov
+  openmeteo_base_url: https://api.open-meteo.com
+  openmeteo_geocoding_base_url: https://geocoding-api.open-meteo.com
+  visualcrossing_base_url: https://weather.visualcrossing.com
+  visualcrossing_api_key: ""
+  request_timeout: 12s
+  user_agent: sky-alpha-pro/0.1.0
+
 database:
   host: 127.0.0.1
   port: 5432

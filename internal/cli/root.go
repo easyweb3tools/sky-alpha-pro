@@ -61,6 +61,7 @@ func init() {
 	rootCmd.AddCommand(newDBCmd())
 	rootCmd.AddCommand(newServeCmd())
 	rootCmd.AddCommand(newMarketCmd())
+	rootCmd.AddCommand(newWeatherCmd())
 }
 
 func Execute() error {

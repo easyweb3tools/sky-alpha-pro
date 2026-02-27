@@ -21,6 +21,13 @@ Week 3 delivery:
 - market query API: `GET /api/v1/markets`
 - market and price snapshots persisted into PostgreSQL (`markets`, `market_prices`)
 
+Week 4 delivery:
+
+- NWS / Open-Meteo / Visual Crossing integration
+- normalized weather forecast and observation model
+- weather APIs: `GET /api/v1/weather/forecast`, `GET /api/v1/weather/observation/:station`
+- weather CLI: `weather forecast`, `weather observe`
+
 ## MVP Database Rule
 
 MVP 阶段数据库表结构统一由 GORM `AutoMigrate` 管理：
@@ -85,6 +92,22 @@ REST API:
 ```bash
 curl -X POST http://127.0.0.1:8080/api/v1/markets/sync
 curl "http://127.0.0.1:8080/api/v1/markets?active=true&limit=20"
+```
+
+## Weather Query (W4)
+
+CLI:
+
+```bash
+go run ./cmd/sky-alpha-pro weather forecast "New York, NY" --source all --days 5
+go run ./cmd/sky-alpha-pro weather observe KNYC
+```
+
+REST API:
+
+```bash
+curl "http://127.0.0.1:8080/api/v1/weather/forecast?location=40.7829,-73.9654&source=all&days=5"
+curl "http://127.0.0.1:8080/api/v1/weather/observation/KNYC"
 ```
 
 ## Container

@@ -8,6 +8,7 @@ import (
 	"gorm.io/gorm"
 
 	"sky-alpha-pro/internal/market"
+	"sky-alpha-pro/internal/weather"
 	"sky-alpha-pro/pkg/config"
 )
 
@@ -19,12 +20,15 @@ func NewRouter(cfg *config.Config, log *zap.Logger, db *gorm.DB) http.Handler {
 
 	router.GET("/health", HealthHandler(cfg, db))
 	marketSvc := market.NewService(cfg.Market, db, log)
+	weatherSvc := weather.NewService(cfg.Weather, db, log)
 
 	api := router.Group("/api/v1")
 	{
 		api.GET("/health", HealthHandler(cfg, db))
 		api.GET("/markets", ListMarketsHandler(marketSvc))
 		api.POST("/markets/sync", SyncMarketsHandler(marketSvc))
+		api.GET("/weather/forecast", GetForecastHandler(weatherSvc))
+		api.GET("/weather/observation/:station", GetObservationHandler(weatherSvc))
 	}
 
 	return router

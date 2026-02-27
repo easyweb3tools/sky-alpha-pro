@@ -46,7 +46,7 @@ type MarketPrice struct {
 
 type Forecast struct {
 	ID            uint64         `gorm:"column:id;primaryKey;autoIncrement"`
-	MarketID      string         `gorm:"column:market_id;type:uuid;index:idx_forecasts_market,priority:1"`
+	MarketID      *string        `gorm:"column:market_id;type:uuid;index:idx_forecasts_market,priority:1"`
 	StationID     string         `gorm:"column:station_id;size:20;index:idx_forecasts_station_date,priority:1"`
 	Location      string         `gorm:"column:location;size:255;not null"`
 	ForecastDate  time.Time      `gorm:"column:forecast_date;type:date;not null;index:idx_forecasts_station_date,priority:2"`

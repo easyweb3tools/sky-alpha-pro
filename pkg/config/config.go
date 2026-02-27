@@ -13,6 +13,7 @@ type Config struct {
 	App      AppConfig      `mapstructure:"app"`
 	Server   ServerConfig   `mapstructure:"server"`
 	Market   MarketConfig   `mapstructure:"market"`
+	Weather  WeatherConfig  `mapstructure:"weather"`
 	Database DatabaseConfig `mapstructure:"database"`
 	Log      LogConfig      `mapstructure:"log"`
 }
@@ -50,6 +51,16 @@ type MarketConfig struct {
 	WeatherTag     string        `mapstructure:"weather_tag"`
 	SyncLimit      int           `mapstructure:"sync_limit"`
 	RequestTimeout time.Duration `mapstructure:"request_timeout"`
+}
+
+type WeatherConfig struct {
+	NWSBaseURL                string        `mapstructure:"nws_base_url"`
+	OpenMeteoBaseURL          string        `mapstructure:"openmeteo_base_url"`
+	OpenMeteoGeocodingBaseURL string        `mapstructure:"openmeteo_geocoding_base_url"`
+	VisualCrossingBaseURL     string        `mapstructure:"visualcrossing_base_url"`
+	VisualCrossingAPIKey      string        `mapstructure:"visualcrossing_api_key"`
+	RequestTimeout            time.Duration `mapstructure:"request_timeout"`
+	UserAgent                 string        `mapstructure:"user_agent"`
 }
 
 type LogConfig struct {
@@ -106,6 +117,14 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("market.weather_tag", "weather")
 	v.SetDefault("market.sync_limit", 100)
 	v.SetDefault("market.request_timeout", "12s")
+
+	v.SetDefault("weather.nws_base_url", "https://api.weather.gov")
+	v.SetDefault("weather.openmeteo_base_url", "https://api.open-meteo.com")
+	v.SetDefault("weather.openmeteo_geocoding_base_url", "https://geocoding-api.open-meteo.com")
+	v.SetDefault("weather.visualcrossing_base_url", "https://weather.visualcrossing.com")
+	v.SetDefault("weather.visualcrossing_api_key", "")
+	v.SetDefault("weather.request_timeout", "12s")
+	v.SetDefault("weather.user_agent", "sky-alpha-pro/0.1.0")
 
 	v.SetDefault("database.host", "127.0.0.1")
 	v.SetDefault("database.port", 5432)
