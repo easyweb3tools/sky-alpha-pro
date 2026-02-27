@@ -12,6 +12,7 @@ import (
 type Config struct {
 	App      AppConfig      `mapstructure:"app"`
 	Server   ServerConfig   `mapstructure:"server"`
+	Market   MarketConfig   `mapstructure:"market"`
 	Database DatabaseConfig `mapstructure:"database"`
 	Log      LogConfig      `mapstructure:"log"`
 }
@@ -41,6 +42,14 @@ type DatabaseConfig struct {
 	TimeZone     string `mapstructure:"timezone"`
 	MaxOpenConns int    `mapstructure:"max_open_conns"`
 	MaxIdleConns int    `mapstructure:"max_idle_conns"`
+}
+
+type MarketConfig struct {
+	GammaBaseURL   string        `mapstructure:"gamma_base_url"`
+	CLOBBaseURL    string        `mapstructure:"clob_base_url"`
+	WeatherTag     string        `mapstructure:"weather_tag"`
+	SyncLimit      int           `mapstructure:"sync_limit"`
+	RequestTimeout time.Duration `mapstructure:"request_timeout"`
 }
 
 type LogConfig struct {
@@ -91,6 +100,12 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("server.read_header_timeout", "5s")
 	v.SetDefault("server.write_timeout", "15s")
 	v.SetDefault("server.shutdown_timeout", "10s")
+
+	v.SetDefault("market.gamma_base_url", "https://gamma-api.polymarket.com")
+	v.SetDefault("market.clob_base_url", "https://clob.polymarket.com")
+	v.SetDefault("market.weather_tag", "weather")
+	v.SetDefault("market.sync_limit", 100)
+	v.SetDefault("market.request_timeout", "12s")
 
 	v.SetDefault("database.host", "127.0.0.1")
 	v.SetDefault("database.port", 5432)

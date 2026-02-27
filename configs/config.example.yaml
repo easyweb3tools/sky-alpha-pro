@@ -11,6 +11,13 @@ server:
   write_timeout: 15s
   shutdown_timeout: 10s
 
+market:
+  gamma_base_url: https://gamma-api.polymarket.com
+  clob_base_url: https://clob.polymarket.com
+  weather_tag: weather
+  sync_limit: 100
+  request_timeout: 12s
+
 database:
   host: 127.0.0.1
   port: 5432

@@ -1,6 +1,6 @@
 APP_NAME := sky-alpha-pro
 
-.PHONY: tidy build test run db-migrate
+.PHONY: tidy build test run db-migrate market-sync
 
 tidy:
 	go mod tidy
@@ -16,3 +16,6 @@ run:
 
 db-migrate:
 	go run ./cmd/sky-alpha-pro db migrate --config ./configs/config.yaml
+
+market-sync:
+	go run ./cmd/sky-alpha-pro market sync --config ./configs/config.yaml
