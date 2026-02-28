@@ -41,7 +41,7 @@ agent:
   concurrency: 8
   market_timeout: 20s
   max_forecast_days: 10
-  vertex_project: ""
+  vertex_project: your-gcp-project-id
   vertex_location: us-central1
   vertex_model: gemini-2.5-flash
   vertex_temperature: 0.2
