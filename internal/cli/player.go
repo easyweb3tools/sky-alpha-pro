@@ -189,13 +189,30 @@ func newPlayerCompareCmd() *cobra.Command {
 				return enc.Encode(item)
 			}
 			fmt.Fprintf(cmd.OutOrStdout(), "player:             %s\n", item.PlayerAddress)
-			fmt.Fprintf(cmd.OutOrStdout(), "player_win_rate:    %.2f%%\n", item.PlayerWinRate)
-			fmt.Fprintf(cmd.OutOrStdout(), "player_total_pnl:   %.4f\n", item.PlayerTotalPnL)
+			if item.PlayerWinRateReady {
+				fmt.Fprintf(cmd.OutOrStdout(), "player_win_rate:    %.2f%%\n", item.PlayerWinRate)
+			} else {
+				fmt.Fprintf(cmd.OutOrStdout(), "player_win_rate:    N/A (not computed yet)\n")
+			}
+			if item.PlayerTotalPnL != nil {
+				fmt.Fprintf(cmd.OutOrStdout(), "player_total_pnl:   %.4f\n", *item.PlayerTotalPnL)
+			} else {
+				fmt.Fprintf(cmd.OutOrStdout(), "player_total_pnl:   N/A\n")
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "player_total_volume:%.4f\n", item.PlayerTotalVolume)
 			fmt.Fprintf(cmd.OutOrStdout(), "my_win_rate:        %.2f%%\n", item.MyWinRate)
 			fmt.Fprintf(cmd.OutOrStdout(), "my_realized_pnl:    %.4f\n", item.MyRealizedPnL)
 			fmt.Fprintf(cmd.OutOrStdout(), "my_filled_trades:   %d\n", item.MyFilledTrades)
-			fmt.Fprintf(cmd.OutOrStdout(), "win_rate_diff:      %.2f%%\n", item.WinRateDiff)
-			fmt.Fprintf(cmd.OutOrStdout(), "realized_pnl_diff:  %.4f\n", item.RealizedPnLDiff)
+			if item.WinRateDiff != nil {
+				fmt.Fprintf(cmd.OutOrStdout(), "win_rate_diff:      %.2f%%\n", *item.WinRateDiff)
+			} else {
+				fmt.Fprintf(cmd.OutOrStdout(), "win_rate_diff:      N/A\n")
+			}
+			if item.RealizedPnLDiff != nil {
+				fmt.Fprintf(cmd.OutOrStdout(), "realized_pnl_diff:  %.4f\n", *item.RealizedPnLDiff)
+			} else {
+				fmt.Fprintf(cmd.OutOrStdout(), "realized_pnl_diff:  N/A (%s)\n", item.RealizedPnLDiffStatus)
+			}
 			return nil
 		},
 	}

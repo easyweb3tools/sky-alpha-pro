@@ -31,7 +31,9 @@ type PlayerView struct {
 	Address        string     `json:"address"`
 	Username       string     `json:"username,omitempty"`
 	TotalPnL       *float64   `json:"total_pnl,omitempty"`
+	TotalVolume    *float64   `json:"total_volume,omitempty"`
 	WinRate        float64    `json:"win_rate"`
+	WinRateReady   bool       `json:"win_rate_ready"`
 	TotalMarkets   int        `json:"total_markets"`
 	WeatherMarkets int        `json:"weather_markets"`
 	RankOverall    int        `json:"rank_overall"`
@@ -52,13 +54,16 @@ type PlayerPositionView struct {
 }
 
 type CompareView struct {
-	PlayerAddress   string  `json:"player_address"`
-	PlayerWinRate   float64 `json:"player_win_rate"`
-	PlayerTotalPnL  float64 `json:"player_total_pnl"`
-	PlayerMarkets   int     `json:"player_markets"`
-	MyWinRate       float64 `json:"my_win_rate"`
-	MyRealizedPnL   float64 `json:"my_realized_pnl"`
-	MyFilledTrades  int     `json:"my_filled_trades"`
-	WinRateDiff     float64 `json:"win_rate_diff"`
-	RealizedPnLDiff float64 `json:"realized_pnl_diff"`
+	PlayerAddress         string   `json:"player_address"`
+	PlayerWinRate         float64  `json:"player_win_rate"`
+	PlayerWinRateReady    bool     `json:"player_win_rate_ready"`
+	PlayerTotalPnL        *float64 `json:"player_total_pnl,omitempty"`
+	PlayerTotalVolume     float64  `json:"player_total_volume"`
+	PlayerMarkets         int      `json:"player_markets"`
+	MyWinRate             float64  `json:"my_win_rate"`
+	MyRealizedPnL         float64  `json:"my_realized_pnl"`
+	MyFilledTrades        int      `json:"my_filled_trades"`
+	WinRateDiff           *float64 `json:"win_rate_diff,omitempty"`
+	RealizedPnLDiff       *float64 `json:"realized_pnl_diff,omitempty"`
+	RealizedPnLDiffStatus string   `json:"realized_pnl_diff_status"`
 }

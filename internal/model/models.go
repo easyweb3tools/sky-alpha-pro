@@ -154,6 +154,7 @@ type Player struct {
 	Address        string              `gorm:"column:address;size:42;uniqueIndex;not null"`
 	Username       string              `gorm:"column:username;size:100"`
 	TotalPnL       decimal.NullDecimal `gorm:"column:total_pnl;type:decimal(18,2)"`
+	TotalVolume    decimal.NullDecimal `gorm:"column:total_volume;type:decimal(18,2)"`
 	WinRate        float64             `gorm:"column:win_rate;type:decimal(5,2)"`
 	TotalMarkets   int                 `gorm:"column:total_markets;default:0"`
 	WeatherMarkets int                 `gorm:"column:weather_markets;default:0"`

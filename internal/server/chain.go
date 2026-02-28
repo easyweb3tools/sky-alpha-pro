@@ -71,14 +71,12 @@ func ListCompetitorsHandler(svc *chain.Service) gin.HandlerFunc {
 		}
 
 		limit := 20
-		if raw := strings.TrimSpace(c.Query("limit")); raw != "" {
-			parsed, err := strconv.Atoi(raw)
-			if err != nil || parsed <= 0 {
-				c.JSON(http.StatusBadRequest, gin.H{
-					"error": gin.H{"code": "BAD_REQUEST", "message": "invalid limit query parameter"},
-				})
-				return
-			}
+		if parsed, err := parsePositiveIntQuery(c, "limit", 20); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{
+				"error": gin.H{"code": "BAD_REQUEST", "message": err.Error()},
+			})
+			return
+		} else {
 			limit = parsed
 		}
 
@@ -126,14 +124,12 @@ func ListCompetitorTradesHandler(svc *chain.Service) gin.HandlerFunc {
 		}
 
 		limit := 50
-		if raw := strings.TrimSpace(c.Query("limit")); raw != "" {
-			parsed, err := strconv.Atoi(raw)
-			if err != nil || parsed <= 0 {
-				c.JSON(http.StatusBadRequest, gin.H{
-					"error": gin.H{"code": "BAD_REQUEST", "message": "invalid limit query parameter"},
-				})
-				return
-			}
+		if parsed, err := parsePositiveIntQuery(c, "limit", 50); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{
+				"error": gin.H{"code": "BAD_REQUEST", "message": err.Error()},
+			})
+			return
+		} else {
 			limit = parsed
 		}
 

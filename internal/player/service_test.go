@@ -2,6 +2,7 @@ package player
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -76,6 +77,12 @@ func TestRefreshFromCompetitorsAndList(t *testing.T) {
 	if show.TotalMarkets != 2 {
 		t.Fatalf("expected total_markets 2, got %d", show.TotalMarkets)
 	}
+	if show.TotalPnL != nil {
+		t.Fatalf("expected total_pnl unavailable for now")
+	}
+	if show.TotalVolume == nil || *show.TotalVolume <= 0 {
+		t.Fatalf("expected total_volume available")
+	}
 
 	positions, err := svc.ListPlayerPositions(context.Background(), show.Address, PositionOptions{Limit: 10})
 	if err != nil {
@@ -120,6 +127,100 @@ func TestCompareWithMyStrategy(t *testing.T) {
 	}
 	if cmp.MyWinRate <= 0 {
 		t.Fatalf("expected positive my win rate")
+	}
+	if cmp.PlayerTotalPnL != nil {
+		t.Fatalf("expected player pnl unavailable")
+	}
+	if cmp.RealizedPnLDiff != nil {
+		t.Fatalf("expected realized pnl diff unavailable")
+	}
+}
+
+func TestRefreshFromCompetitorsEmptySource(t *testing.T) {
+	db := setupPlayerTestDB(t)
+	svc := NewService(db, zap.NewNop())
+
+	res, err := svc.RefreshFromCompetitors(context.Background(), RefreshOptions{Limit: 10})
+	if err != nil {
+		t.Fatalf("refresh: %v", err)
+	}
+	if res.PlayersUpserted != 0 || res.PositionsUpserted != 0 {
+		t.Fatalf("expected zero upserts, got players=%d positions=%d", res.PlayersUpserted, res.PositionsUpserted)
+	}
+}
+
+func TestGetLeaderboardInvalidType(t *testing.T) {
+	db := setupPlayerTestDB(t)
+	svc := NewService(db, zap.NewNop())
+
+	_, err := svc.GetLeaderboard(context.Background(), LeaderboardOptions{Limit: 10, Type: "invalid"})
+	if err == nil {
+		t.Fatalf("expected invalid type error")
+	}
+	if !errors.Is(err, ErrPlayerBadRequest) {
+		t.Fatalf("expected ErrPlayerBadRequest, got %v", err)
+	}
+}
+
+func TestGetPlayerNotFound(t *testing.T) {
+	db := setupPlayerTestDB(t)
+	svc := NewService(db, zap.NewNop())
+
+	_, err := svc.GetPlayer(context.Background(), "0x9999999999999999999999999999999999999999")
+	if err == nil {
+		t.Fatalf("expected not found")
+	}
+	if !errors.Is(err, ErrPlayerNotFound) {
+		t.Fatalf("expected ErrPlayerNotFound, got %v", err)
+	}
+}
+
+func TestRefreshIdempotent(t *testing.T) {
+	db := setupPlayerTestDB(t)
+	now := time.Date(2026, 2, 28, 0, 0, 0, 0, time.UTC)
+	if err := db.Exec(`
+		INSERT INTO competitors (
+			id, address, is_bot, bot_confidence, total_trades, total_volume,
+			avg_trade_interval_sec, created_at, updated_at
+		) VALUES
+			(1, '0xaaa0000000000000000000000000000000000001', 0, 0, 0, 0, 0, ?, ?)
+	`, now, now).Error; err != nil {
+		t.Fatalf("seed competitors: %v", err)
+	}
+	if err := db.Exec(`
+		INSERT INTO competitor_trades (
+			competitor_id, market_id, outcome, side, amount_usdc, timestamp, tx_hash, block_number, created_at
+		) VALUES
+			(1, 'm1', 'YES', 'BUY', 10, ?, '0xabc', 1, ?)
+	`, now, now).Error; err != nil {
+		t.Fatalf("seed competitor trades: %v", err)
+	}
+	if err := db.Exec(`INSERT INTO markets (id, market_type) VALUES ('m1', 'temperature_high')`).Error; err != nil {
+		t.Fatalf("seed markets: %v", err)
+	}
+
+	svc := NewService(db, zap.NewNop())
+	if _, err := svc.RefreshFromCompetitors(context.Background(), RefreshOptions{Limit: 10}); err != nil {
+		t.Fatalf("first refresh: %v", err)
+	}
+	if _, err := svc.RefreshFromCompetitors(context.Background(), RefreshOptions{Limit: 10}); err != nil {
+		t.Fatalf("second refresh: %v", err)
+	}
+
+	var playerCount int64
+	if err := db.Model(&model.Player{}).Count(&playerCount).Error; err != nil {
+		t.Fatalf("count players: %v", err)
+	}
+	if playerCount != 1 {
+		t.Fatalf("expected 1 player row after repeated refresh, got %d", playerCount)
+	}
+
+	var positionCount int64
+	if err := db.Model(&model.PlayerPosition{}).Count(&positionCount).Error; err != nil {
+		t.Fatalf("count positions: %v", err)
+	}
+	if positionCount != 1 {
+		t.Fatalf("expected 1 player position row after repeated refresh, got %d", positionCount)
 	}
 }
 

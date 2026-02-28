@@ -296,6 +296,9 @@ curl "http://127.0.0.1:8080/api/v1/chain/competitors/0xabc.../trades?limit=50"
 
 ## Player Tracking (W10)
 
+`players` 数据由 `player sync` 显式触发构建；读接口不会隐式触发同步。
+当前 MVP 仅可靠聚合 `total_volume`（总成交额），`total_pnl` 暂不从链上活动推断。
+
 CLI:
 
 ```bash

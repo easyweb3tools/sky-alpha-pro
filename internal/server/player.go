@@ -5,15 +5,18 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/gin-gonic/gin"
 
 	"sky-alpha-pro/internal/player"
 )
 
+var playerSyncMu sync.Mutex
+
 func ListPlayersHandler(svc *player.Service) gin.HandlerFunc {
 	return func(c *gin.Context) {
-		limit, err := parseLimitQuery(c, 20)
+		limit, err := parsePositiveIntQuery(c, "limit", 20)
 		if err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{"code": "BAD_REQUEST", "message": err.Error()}})
 			return
@@ -54,7 +57,7 @@ func GetPlayerHandler(svc *player.Service) gin.HandlerFunc {
 func ListPlayerPositionsHandler(svc *player.Service) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		addr := strings.TrimSpace(c.Param("address"))
-		limit, err := parseLimitQuery(c, 50)
+		limit, err := parsePositiveIntQuery(c, "limit", 50)
 		if err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{"code": "BAD_REQUEST", "message": err.Error()}})
 			return
@@ -71,7 +74,7 @@ func ListPlayerPositionsHandler(svc *player.Service) gin.HandlerFunc {
 
 func GetPlayerLeaderboardHandler(svc *player.Service) gin.HandlerFunc {
 	return func(c *gin.Context) {
-		limit, err := parseLimitQuery(c, 20)
+		limit, err := parsePositiveIntQuery(c, "limit", 20)
 		if err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{"code": "BAD_REQUEST", "message": err.Error()}})
 			return
@@ -104,7 +107,15 @@ func ComparePlayerHandler(svc *player.Service) gin.HandlerFunc {
 
 func SyncPlayersHandler(svc *player.Service) gin.HandlerFunc {
 	return func(c *gin.Context) {
-		limit, err := parseLimitQuery(c, 50)
+		if !playerSyncMu.TryLock() {
+			c.JSON(http.StatusConflict, gin.H{
+				"error": gin.H{"code": "PLAYER_SYNC_RUNNING", "message": "player sync already running"},
+			})
+			return
+		}
+		defer playerSyncMu.Unlock()
+
+		limit, err := parsePositiveIntQuery(c, "limit", 50)
 		if err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{"code": "BAD_REQUEST", "message": err.Error()}})
 			return
@@ -128,15 +139,4 @@ func mapPlayerError(err error) (int, string) {
 	default:
 		return http.StatusInternalServerError, "PLAYER_ERROR"
 	}
-}
-
-func parseLimitQuery(c *gin.Context, dft int) (int, error) {
-	if raw := strings.TrimSpace(c.Query("limit")); raw != "" {
-		limit, err := strconv.Atoi(raw)
-		if err != nil || limit <= 0 {
-			return 0, errors.New("invalid limit query parameter")
-		}
-		return limit, nil
-	}
-	return dft, nil
 }

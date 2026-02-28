@@ -54,10 +54,6 @@ func NewService(db *gorm.DB, log *zap.Logger) *Service {
 }
 
 func (s *Service) ListPlayers(ctx context.Context, opts ListOptions) ([]PlayerView, error) {
-	if err := s.seedPlayersIfEmpty(ctx, opts.Limit); err != nil {
-		return nil, err
-	}
-
 	limit := normalizeLimit(opts.Limit)
 	q := s.db.WithContext(ctx).Model(&model.Player{})
 	if opts.MinWeatherMarket > 0 {
@@ -76,9 +72,6 @@ func (s *Service) ListPlayers(ctx context.Context, opts ListOptions) ([]PlayerVi
 }
 
 func (s *Service) GetPlayer(ctx context.Context, address string) (*PlayerView, error) {
-	if err := s.seedPlayersIfEmpty(ctx, defaultLimit); err != nil {
-		return nil, err
-	}
 	addr := normalizeAddress(address)
 	if addr == "" {
 		return nil, fmt.Errorf("%w: address is required", ErrPlayerBadRequest)
@@ -95,9 +88,6 @@ func (s *Service) GetPlayer(ctx context.Context, address string) (*PlayerView, e
 }
 
 func (s *Service) ListPlayerPositions(ctx context.Context, address string, opts PositionOptions) ([]PlayerPositionView, error) {
-	if err := s.seedPlayersIfEmpty(ctx, defaultLimit); err != nil {
-		return nil, err
-	}
 	addr := normalizeAddress(address)
 	if addr == "" {
 		return nil, fmt.Errorf("%w: address is required", ErrPlayerBadRequest)
@@ -147,9 +137,6 @@ func (s *Service) ListPlayerPositions(ctx context.Context, address string, opts 
 }
 
 func (s *Service) GetLeaderboard(ctx context.Context, opts LeaderboardOptions) ([]PlayerView, error) {
-	if err := s.seedPlayersIfEmpty(ctx, opts.Limit); err != nil {
-		return nil, err
-	}
 	limit := normalizeLimit(opts.Limit)
 	leaderType := strings.TrimSpace(strings.ToLower(opts.Type))
 
@@ -210,22 +197,31 @@ func (s *Service) CompareWithMyStrategy(ctx context.Context, address string) (*C
 	if st.RealizedPnL.Valid {
 		myPnL = st.RealizedPnL.Decimal.InexactFloat64()
 	}
-	playerPnL := 0.0
-	if playerView.TotalPnL != nil {
-		playerPnL = *playerView.TotalPnL
-	}
 
-	return &CompareView{
-		PlayerAddress:   playerView.Address,
-		PlayerWinRate:   playerView.WinRate,
-		PlayerTotalPnL:  playerPnL,
-		PlayerMarkets:   playerView.TotalMarkets,
-		MyWinRate:       myWinRate,
-		MyRealizedPnL:   myPnL,
-		MyFilledTrades:  int(st.FilledTrades),
-		WinRateDiff:     playerView.WinRate - myWinRate,
-		RealizedPnLDiff: playerPnL - myPnL,
-	}, nil
+	compare := &CompareView{
+		PlayerAddress:         playerView.Address,
+		PlayerWinRate:         playerView.WinRate,
+		PlayerWinRateReady:    playerView.WinRateReady,
+		PlayerTotalPnL:        playerView.TotalPnL,
+		PlayerMarkets:         playerView.TotalMarkets,
+		MyWinRate:             myWinRate,
+		MyRealizedPnL:         myPnL,
+		MyFilledTrades:        int(st.FilledTrades),
+		RealizedPnLDiffStatus: "player_pnl_unavailable",
+	}
+	if playerView.TotalVolume != nil {
+		compare.PlayerTotalVolume = *playerView.TotalVolume
+	}
+	if playerView.WinRateReady {
+		d := playerView.WinRate - myWinRate
+		compare.WinRateDiff = &d
+	}
+	if playerView.TotalPnL != nil {
+		d := *playerView.TotalPnL - myPnL
+		compare.RealizedPnLDiff = &d
+		compare.RealizedPnLDiffStatus = "ok"
+	}
+	return compare, nil
 }
 
 func (s *Service) RefreshFromCompetitors(ctx context.Context, opts RefreshOptions) (*RefreshResult, error) {
@@ -252,8 +248,8 @@ func (s *Service) RefreshFromCompetitors(ctx context.Context, opts RefreshOption
 		return summaries[i].TotalTrades > summaries[j].TotalTrades
 	})
 	weatherRank := make(map[string]int, len(summaries))
-	for idx, s := range summaries {
-		weatherRank[s.Address] = idx + 1
+	for idx, sum := range summaries {
+		weatherRank[sum.Address] = idx + 1
 	}
 
 	sort.SliceStable(summaries, func(i, j int) bool {
@@ -266,8 +262,8 @@ func (s *Service) RefreshFromCompetitors(ctx context.Context, opts RefreshOption
 		return summaries[i].WeatherMarkets > summaries[j].WeatherMarkets
 	})
 	overallRank := make(map[string]int, len(summaries))
-	for idx, s := range summaries {
-		overallRank[s.Address] = idx + 1
+	for idx, sum := range summaries {
+		overallRank[sum.Address] = idx + 1
 	}
 
 	positions, err := s.loadPositionSummaries(ctx, limit)
@@ -276,8 +272,12 @@ func (s *Service) RefreshFromCompetitors(ctx context.Context, opts RefreshOption
 	}
 
 	err = s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		playerIDByAddr := make(map[string]uint64, len(summaries))
 		now := time.Now().UTC()
+		existingIDs, err := loadPlayerIDMap(tx, summaries)
+		if err != nil {
+			return err
+		}
+		playerIDByAddr := make(map[string]uint64, len(summaries))
 
 		for _, sum := range summaries {
 			row := model.Player{
@@ -289,18 +289,18 @@ func (s *Service) RefreshFromCompetitors(ctx context.Context, opts RefreshOption
 				RankOverall:    overallRank[sum.Address],
 				RankWeather:    weatherRank[sum.Address],
 				LastActiveAt:   sum.LastSeenAt,
+				TotalVolume:    decimal.NewNullDecimal(sum.TotalVolume),
+				TotalPnL:       decimal.NullDecimal{},
 				UpdatedAt:      now,
 				CreatedAt:      now,
-			}
-			if sum.TotalVolume.GreaterThan(decimal.Zero) {
-				row.TotalPnL = decimal.NewNullDecimal(sum.TotalVolume)
 			}
 
 			if err := tx.Clauses(clause.OnConflict{
 				Columns: []clause.Column{{Name: "address"}},
 				DoUpdates: clause.Assignments(map[string]any{
 					"username":        row.Username,
-					"total_pnl":       row.TotalPnL,
+					"total_pnl":       gorm.Expr("NULL"),
+					"total_volume":    row.TotalVolume,
 					"win_rate":        row.WinRate,
 					"total_markets":   row.TotalMarkets,
 					"weather_markets": row.WeatherMarkets,
@@ -314,11 +314,23 @@ func (s *Service) RefreshFromCompetitors(ctx context.Context, opts RefreshOption
 			}
 			result.PlayersUpserted++
 
-			var persisted model.Player
-			if err := tx.Where("address = ?", row.Address).First(&persisted).Error; err != nil {
-				return err
+			pid := row.ID
+			if pid == 0 {
+				if existing, ok := existingIDs[row.Address]; ok {
+					pid = existing
+				}
 			}
-			playerIDByAddr[row.Address] = persisted.ID
+			if pid == 0 {
+				var persisted struct {
+					ID uint64 `gorm:"column:id"`
+				}
+				if err := tx.Model(&model.Player{}).Select("id").Where("address = ?", row.Address).Take(&persisted).Error; err != nil {
+					return err
+				}
+				pid = persisted.ID
+			}
+			existingIDs[row.Address] = pid
+			playerIDByAddr[row.Address] = pid
 		}
 
 		for _, pos := range positions {
@@ -326,7 +338,10 @@ func (s *Service) RefreshFromCompetitors(ctx context.Context, opts RefreshOption
 			if pid == 0 || pos.MarketID == "" || pos.Outcome == "" {
 				continue
 			}
-			lastUpdate := time.Now().UTC()
+			if pos.Size.Equal(decimal.Zero) {
+				continue
+			}
+			lastUpdate := now
 			if pos.LastUpdate != nil {
 				lastUpdate = pos.LastUpdate.UTC()
 			}
@@ -335,7 +350,6 @@ func (s *Service) RefreshFromCompetitors(ctx context.Context, opts RefreshOption
 				MarketID:     pos.MarketID,
 				Outcome:      pos.Outcome,
 				Size:         pos.Size,
-				CurrentValue: decimal.NewNullDecimal(pos.Size),
 				FirstEntryAt: pos.FirstEntry,
 				LastUpdateAt: lastUpdate,
 			}
@@ -343,7 +357,9 @@ func (s *Service) RefreshFromCompetitors(ctx context.Context, opts RefreshOption
 				Columns: []clause.Column{{Name: "player_id"}, {Name: "market_id"}, {Name: "outcome"}},
 				DoUpdates: clause.Assignments(map[string]any{
 					"size":           entry.Size,
-					"current_value":  entry.CurrentValue,
+					"current_value":  gorm.Expr("NULL"),
+					"avg_price":      gorm.Expr("NULL"),
+					"pnl":            gorm.Expr("NULL"),
 					"first_entry_at": entry.FirstEntryAt,
 					"last_update_at": entry.LastUpdateAt,
 				}),
@@ -365,12 +381,12 @@ func (s *Service) RefreshFromCompetitors(ctx context.Context, opts RefreshOption
 
 func (s *Service) loadCompetitorSummaries(ctx context.Context, limit int) ([]competitorSummary, error) {
 	type row struct {
-		Address        string  `gorm:"column:address"`
-		TotalTrades    int     `gorm:"column:total_trades"`
-		TotalMarkets   int     `gorm:"column:total_markets"`
-		WeatherMarkets int     `gorm:"column:weather_markets"`
-		TotalVolume    float64 `gorm:"column:total_volume"`
-		LastSeenAt     string  `gorm:"column:last_seen_at"`
+		Address        string `gorm:"column:address"`
+		TotalTrades    int    `gorm:"column:total_trades"`
+		TotalMarkets   int    `gorm:"column:total_markets"`
+		WeatherMarkets int    `gorm:"column:weather_markets"`
+		TotalVolume    string `gorm:"column:total_volume"`
+		LastSeenAt     string `gorm:"column:last_seen_at"`
 	}
 	rows := make([]row, 0)
 	if err := s.db.WithContext(ctx).
@@ -380,7 +396,7 @@ func (s *Service) loadCompetitorSummaries(ctx context.Context, limit int) ([]com
 			COUNT(ct.id) AS total_trades,
 			COUNT(DISTINCT CASE WHEN ct.market_id <> '' THEN ct.market_id END) AS total_markets,
 			COUNT(DISTINCT CASE WHEN m.market_type IN ('temperature_high','temperature_low') THEN ct.market_id END) AS weather_markets,
-			COALESCE(SUM(ct.amount_usdc), 0) AS total_volume,
+			CAST(COALESCE(SUM(ct.amount_usdc), 0) AS TEXT) AS total_volume,
 			MAX(ct.timestamp) AS last_seen_at
 		`).
 		Joins("JOIN competitor_trades ct ON ct.competitor_id = c.id").
@@ -395,17 +411,21 @@ func (s *Service) loadCompetitorSummaries(ctx context.Context, limit int) ([]com
 
 	out := make([]competitorSummary, 0, len(rows))
 	for _, r := range rows {
-		t, parseErr := parseDBTime(r.LastSeenAt)
-		if parseErr != nil {
-			return nil, parseErr
+		vol, volErr := parseDBDecimal(r.TotalVolume)
+		if volErr != nil {
+			return nil, volErr
+		}
+		lastSeen, lastErr := parseDBTime(r.LastSeenAt)
+		if lastErr != nil {
+			return nil, lastErr
 		}
 		out = append(out, competitorSummary{
 			Address:        normalizeAddress(r.Address),
 			TotalTrades:    r.TotalTrades,
 			TotalMarkets:   r.TotalMarkets,
 			WeatherMarkets: r.WeatherMarkets,
-			TotalVolume:    decimal.NewFromFloat(r.TotalVolume),
-			LastSeenAt:     t,
+			TotalVolume:    vol,
+			LastSeenAt:     lastSeen,
 		})
 	}
 	return out, nil
@@ -413,12 +433,12 @@ func (s *Service) loadCompetitorSummaries(ctx context.Context, limit int) ([]com
 
 func (s *Service) loadPositionSummaries(ctx context.Context, limit int) ([]positionSummary, error) {
 	type row struct {
-		Address    string  `gorm:"column:address"`
-		MarketID   string  `gorm:"column:market_id"`
-		Outcome    string  `gorm:"column:outcome"`
-		Size       float64 `gorm:"column:size"`
-		FirstEntry string  `gorm:"column:first_entry_at"`
-		LastUpdate string  `gorm:"column:last_update_at"`
+		Address    string `gorm:"column:address"`
+		MarketID   string `gorm:"column:market_id"`
+		Outcome    string `gorm:"column:outcome"`
+		Size       string `gorm:"column:size"`
+		FirstEntry string `gorm:"column:first_entry_at"`
+		LastUpdate string `gorm:"column:last_update_at"`
 	}
 	rows := make([]row, 0)
 	if err := s.db.WithContext(ctx).
@@ -427,7 +447,11 @@ func (s *Service) loadPositionSummaries(ctx context.Context, limit int) ([]posit
 			c.address AS address,
 			ct.market_id AS market_id,
 			ct.outcome AS outcome,
-			COALESCE(SUM(ct.amount_usdc), 0) AS size,
+			CAST(COALESCE(SUM(CASE
+				WHEN UPPER(ct.side) = 'BUY' THEN ct.amount_usdc
+				WHEN UPPER(ct.side) = 'SELL' THEN -ct.amount_usdc
+				ELSE ct.amount_usdc
+			END), 0) AS TEXT) AS size,
 			MIN(ct.timestamp) AS first_entry_at,
 			MAX(ct.timestamp) AS last_update_at
 		`).
@@ -442,6 +466,10 @@ func (s *Service) loadPositionSummaries(ctx context.Context, limit int) ([]posit
 
 	out := make([]positionSummary, 0, len(rows))
 	for _, r := range rows {
+		size, sizeErr := parseDBDecimal(r.Size)
+		if sizeErr != nil {
+			return nil, sizeErr
+		}
 		first, firstErr := parseDBTime(r.FirstEntry)
 		if firstErr != nil {
 			return nil, firstErr
@@ -454,28 +482,12 @@ func (s *Service) loadPositionSummaries(ctx context.Context, limit int) ([]posit
 			Address:    normalizeAddress(r.Address),
 			MarketID:   strings.TrimSpace(r.MarketID),
 			Outcome:    strings.ToUpper(strings.TrimSpace(r.Outcome)),
-			Size:       decimal.NewFromFloat(r.Size),
+			Size:       size,
 			FirstEntry: first,
 			LastUpdate: last,
 		})
 	}
 	return out, nil
-}
-
-func (s *Service) seedPlayersIfEmpty(ctx context.Context, limit int) error {
-	var count int64
-	if err := s.db.WithContext(ctx).Model(&model.Player{}).Count(&count).Error; err != nil {
-		return err
-	}
-	if count > 0 {
-		return nil
-	}
-	_, err := s.RefreshFromCompetitors(ctx, RefreshOptions{Limit: limit})
-	if err == nil || s.log == nil {
-		return err
-	}
-	s.log.Warn("refresh players from competitors failed", zap.Error(err))
-	return err
 }
 
 func normalizeAddress(address string) string {
@@ -497,6 +509,7 @@ func mapPlayerView(row model.Player) PlayerView {
 		Address:        row.Address,
 		Username:       row.Username,
 		WinRate:        row.WinRate,
+		WinRateReady:   false,
 		TotalMarkets:   row.TotalMarkets,
 		WeatherMarkets: row.WeatherMarkets,
 		RankOverall:    row.RankOverall,
@@ -507,6 +520,10 @@ func mapPlayerView(row model.Player) PlayerView {
 	if row.TotalPnL.Valid {
 		x := row.TotalPnL.Decimal.InexactFloat64()
 		v.TotalPnL = &x
+	}
+	if row.TotalVolume.Valid {
+		x := row.TotalVolume.Decimal.InexactFloat64()
+		v.TotalVolume = &x
 	}
 	return v
 }
@@ -525,11 +542,11 @@ func parseDBTime(raw string) (*time.Time, error) {
 		return nil, nil
 	}
 	layouts := []string{
+		"2006-01-02 15:04:05",
+		"2006-01-02 15:04:05.999999999",
 		time.RFC3339Nano,
 		"2006-01-02 15:04:05.999999999-07:00",
 		"2006-01-02 15:04:05.999999999-07",
-		"2006-01-02 15:04:05.999999999",
-		"2006-01-02 15:04:05",
 	}
 	for _, layout := range layouts {
 		if ts, err := time.Parse(layout, v); err == nil {
@@ -538,4 +555,40 @@ func parseDBTime(raw string) (*time.Time, error) {
 		}
 	}
 	return nil, fmt.Errorf("%w: unsupported time format: %s", ErrPlayerBadRequest, v)
+}
+
+func parseDBDecimal(raw string) (decimal.Decimal, error) {
+	v := strings.TrimSpace(raw)
+	if v == "" {
+		return decimal.Zero, nil
+	}
+	n, err := decimal.NewFromString(v)
+	if err != nil {
+		return decimal.Zero, fmt.Errorf("%w: invalid decimal value: %s", ErrPlayerBadRequest, v)
+	}
+	return n, nil
+}
+
+func loadPlayerIDMap(tx *gorm.DB, summaries []competitorSummary) (map[string]uint64, error) {
+	if len(summaries) == 0 {
+		return map[string]uint64{}, nil
+	}
+	addrs := make([]string, 0, len(summaries))
+	for _, sum := range summaries {
+		addrs = append(addrs, sum.Address)
+	}
+
+	rows := make([]model.Player, 0, len(addrs))
+	if err := tx.Model(&model.Player{}).
+		Select("id", "address").
+		Where("address IN ?", addrs).
+		Find(&rows).Error; err != nil {
+		return nil, err
+	}
+
+	idMap := make(map[string]uint64, len(rows))
+	for _, row := range rows {
+		idMap[normalizeAddress(row.Address)] = row.ID
+	}
+	return idMap, nil
 }
