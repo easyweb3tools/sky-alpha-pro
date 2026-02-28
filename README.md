@@ -39,6 +39,13 @@ Week 5 delivery:
 - signal APIs: `GET /api/v1/signals`, `POST /api/v1/signals/generate`
 - signal CLI: `signal generate`, `signal list`
 
+Week 6 delivery:
+
+- Agent analysis service with tool-call trace (`get_market_prices`, `get_weather_forecast`, `calculate_edge`)
+- Agent decision log persistence into `agent_logs`
+- agent APIs: `POST /api/v1/agent/analyze`, `GET /api/v1/agent/signals`, `GET /api/v1/agent/signals/:id`
+- agent CLI: `agent analyze`, `agent signals`
+
 ## MVP Database Rule
 
 MVP 阶段数据库表结构统一由 GORM `AutoMigrate` 管理：
@@ -140,6 +147,35 @@ REST API:
 ```bash
 curl -X POST "http://127.0.0.1:8080/api/v1/signals/generate?limit=100"
 curl "http://127.0.0.1:8080/api/v1/signals?limit=20&min_edge=5"
+```
+
+## Agent Analysis (W6)
+
+Analyze one market:
+
+```bash
+go run ./cmd/sky-alpha-pro agent analyze <market_id>
+```
+
+Analyze active markets:
+
+```bash
+go run ./cmd/sky-alpha-pro agent analyze --all --limit 20 --depth full
+```
+
+List agent signals:
+
+```bash
+go run ./cmd/sky-alpha-pro agent signals --limit 20 --min-edge 5
+```
+
+REST API:
+
+```bash
+curl -X POST http://127.0.0.1:8080/api/v1/agent/analyze \
+  -H "Content-Type: application/json" \
+  -d '{"market_id":"<market_id>","depth":"full"}'
+curl "http://127.0.0.1:8080/api/v1/agent/signals?limit=20&min_edge=5"
 ```
 
 ## Container

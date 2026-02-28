@@ -1,6 +1,6 @@
 APP_NAME := sky-alpha-pro
 
-.PHONY: tidy build test run db-migrate market-sync signal-generate signal-list
+.PHONY: tidy build test run db-migrate market-sync signal-generate signal-list agent-analyze agent-signals
 
 tidy:
 	go mod tidy
@@ -25,3 +25,9 @@ signal-generate:
 
 signal-list:
 	go run ./cmd/sky-alpha-pro signal list --config ./configs/config.yaml
+
+agent-analyze:
+	go run ./cmd/sky-alpha-pro agent analyze --all --config ./configs/config.yaml
+
+agent-signals:
+	go run ./cmd/sky-alpha-pro agent signals --config ./configs/config.yaml

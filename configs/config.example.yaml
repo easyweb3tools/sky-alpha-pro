@@ -36,6 +36,10 @@ signal:
   forecast_max_age_hours: 24
   min_sigma: 0.5
 
+agent:
+  model: rule-based-agent-v1
+  analyze_limit: 20
+
 database:
   host: 127.0.0.1
   port: 5432

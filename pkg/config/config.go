@@ -15,6 +15,7 @@ type Config struct {
 	Market   MarketConfig   `mapstructure:"market"`
 	Weather  WeatherConfig  `mapstructure:"weather"`
 	Signal   SignalConfig   `mapstructure:"signal"`
+	Agent    AgentConfig    `mapstructure:"agent"`
 	Database DatabaseConfig `mapstructure:"database"`
 	Log      LogConfig      `mapstructure:"log"`
 }
@@ -72,6 +73,11 @@ type SignalConfig struct {
 	Concurrency         int     `mapstructure:"concurrency"`
 	ForecastMaxAgeHours int     `mapstructure:"forecast_max_age_hours"`
 	MinSigma            float64 `mapstructure:"min_sigma"`
+}
+
+type AgentConfig struct {
+	Model        string `mapstructure:"model"`
+	AnalyzeLimit int    `mapstructure:"analyze_limit"`
 }
 
 type LogConfig struct {
@@ -144,6 +150,9 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("signal.concurrency", 10)
 	v.SetDefault("signal.forecast_max_age_hours", 24)
 	v.SetDefault("signal.min_sigma", 0.5)
+
+	v.SetDefault("agent.model", "rule-based-agent-v1")
+	v.SetDefault("agent.analyze_limit", 20)
 
 	v.SetDefault("database.host", "127.0.0.1")
 	v.SetDefault("database.port", 5432)

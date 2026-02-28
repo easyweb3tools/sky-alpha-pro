@@ -141,6 +141,45 @@ func (s *Service) ListSignals(ctx context.Context, opts ListOptions) ([]SignalVi
 	return out, nil
 }
 
+func (s *Service) GenerateSignalForMarketID(ctx context.Context, marketRef string) (*SignalView, error) {
+	market, err := s.loadMarket(ctx, marketRef)
+	if err != nil {
+		return nil, err
+	}
+	knownCities, err := s.loadKnownCities(ctx)
+	if err != nil {
+		s.log.Warn("load known cities failed", zap.Error(err))
+	}
+	if err := s.generateSignalForMarket(ctx, *market, knownCities); err != nil {
+		return nil, err
+	}
+	targetDate, err := marketForecastDate(market.EndDate)
+	if err != nil {
+		return nil, err
+	}
+
+	var row model.Signal
+	if err := s.db.WithContext(ctx).
+		Where("market_id = ?", market.ID).
+		Where("signal_type = ?", "forecast_edge").
+		Where("DATE(signal_date) = ?", targetDate.Format("2006-01-02")).
+		Order("created_at DESC").
+		First(&row).Error; err != nil {
+		return nil, err
+	}
+	view := mapSignalView(row)
+	return &view, nil
+}
+
+func (s *Service) GetSignalByID(ctx context.Context, id uint64) (*SignalView, error) {
+	var row model.Signal
+	if err := s.db.WithContext(ctx).Where("id = ?", id).First(&row).Error; err != nil {
+		return nil, err
+	}
+	view := mapSignalView(row)
+	return &view, nil
+}
+
 func (s *Service) generateSignalForMarket(ctx context.Context, m model.Market, knownCities []string) error {
 	city := inferCity(m, knownCities)
 	if city == "" {
@@ -215,6 +254,20 @@ func (s *Service) generateSignalForMarket(ctx context.Context, m model.Market, k
 		CreatedAt:   time.Now().UTC(),
 	}
 	return s.upsertSignalByDay(ctx, row)
+}
+
+func (s *Service) loadMarket(ctx context.Context, marketRef string) (*model.Market, error) {
+	ref := strings.TrimSpace(marketRef)
+	if ref == "" {
+		return nil, fmt.Errorf("market id is required")
+	}
+	var row model.Market
+	if err := s.db.WithContext(ctx).
+		Where("id = ? OR polymarket_id = ?", ref, ref).
+		Take(&row).Error; err != nil {
+		return nil, err
+	}
+	return &row, nil
 }
 
 func (s *Service) upsertSignalByDay(ctx context.Context, row model.Signal) error {
@@ -515,4 +568,19 @@ func normalCDF(z float64) float64 {
 
 func strconvParseFloat(v string) (float64, error) {
 	return strconv.ParseFloat(strings.TrimSpace(v), 64)
+}
+
+func mapSignalView(row model.Signal) SignalView {
+	return SignalView{
+		ID:          row.ID,
+		MarketID:    row.MarketID,
+		SignalDate:  row.SignalDate,
+		Direction:   row.Direction,
+		EdgePct:     row.EdgePct,
+		Confidence:  row.Confidence,
+		MarketPrice: row.MarketPrice,
+		OurEstimate: row.OurEstimate,
+		Reasoning:   row.Reasoning,
+		CreatedAt:   row.CreatedAt,
+	}
 }
