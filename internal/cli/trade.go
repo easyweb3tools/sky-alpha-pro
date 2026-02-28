@@ -5,6 +5,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
+	"os"
 	"strconv"
 	"strings"
 	"text/tabwriter"
@@ -55,6 +57,9 @@ func newTradeSubmitCmd(use string, side string) *cobra.Command {
 				return err
 			}
 			if appConfig.Trade.ConfirmationRequired && !confirm {
+				if !isInteractiveInput(cmd.InOrStdin()) {
+					return fmt.Errorf("confirmation required in non-interactive mode; pass --confirm explicitly")
+				}
 				ok, err := promptTradeConfirmation(cmd, side, args[0], outcome, price, size)
 				if err != nil {
 					return err
@@ -223,7 +228,7 @@ func newTradePositionsCmd() *cobra.Command {
 			}
 
 			w := tabwriter.NewWriter(cmd.OutOrStdout(), 0, 4, 2, ' ', 0)
-			fmt.Fprintln(w, "MARKET_ID\tOUTCOME\tNET_SIZE\tAVG_ENTRY\tMARK_PRICE\tUNREALIZED_PNL\tREALIZED_PNL\tUPDATED_AT")
+			fmt.Fprintln(w, "MARKET_ID\tOUTCOME\tNET_SIZE\tAVG_ENTRY\tMARK_PRICE\tUNREALIZED_PNL\tREALIZED_PNL\tLATEST_TRADE_AT")
 			for _, it := range items {
 				mark := "-"
 				if it.MarkPrice != nil {
@@ -235,7 +240,7 @@ func newTradePositionsCmd() *cobra.Command {
 				}
 				fmt.Fprintf(w, "%s\t%s\t%.4f\t%.4f\t%s\t%s\t%.4f\t%s\n",
 					it.MarketID, it.Outcome, it.NetSize, it.AvgEntryPrice, mark, unrealized, it.RealizedPnL,
-					it.UpdatedAt.UTC().Format(time.RFC3339))
+					it.LatestTradeAt.UTC().Format(time.RFC3339))
 			}
 			return w.Flush()
 		},
@@ -300,6 +305,7 @@ func newTradePnLCmd() *cobra.Command {
 			fmt.Fprintf(cmd.OutOrStdout(), "filled_trades:     %d\n", report.FilledTrades)
 			fmt.Fprintf(cmd.OutOrStdout(), "win_trades:        %d\n", report.WinTrades)
 			fmt.Fprintf(cmd.OutOrStdout(), "loss_trades:       %d\n", report.LossTrades)
+			fmt.Fprintf(cmd.OutOrStdout(), "break_even_trades: %d\n", report.BreakEvenTrades)
 			fmt.Fprintf(cmd.OutOrStdout(), "win_rate:          %.2f%%\n", report.WinRate)
 			fmt.Fprintf(cmd.OutOrStdout(), "gross_volume_usdc: %.4f\n", report.GrossVolumeUSDC)
 			fmt.Fprintf(cmd.OutOrStdout(), "realized_pnl_usdc: %.4f\n", report.RealizedPnLUSDC)
@@ -335,4 +341,16 @@ func promptTradeConfirmation(cmd *cobra.Command, side, marketID, outcome string,
 	}
 	answer := strings.ToLower(strings.TrimSpace(line))
 	return answer == "y" || answer == "yes", nil
+}
+
+func isInteractiveInput(r io.Reader) bool {
+	f, ok := r.(*os.File)
+	if !ok {
+		return false
+	}
+	info, err := f.Stat()
+	if err != nil {
+		return false
+	}
+	return (info.Mode() & os.ModeCharDevice) != 0
 }

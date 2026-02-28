@@ -228,8 +228,14 @@ func TestListPositions(t *testing.T) {
 	if items[0].NetSize != 6 {
 		t.Fatalf("expected net size 6, got %.4f", items[0].NetSize)
 	}
+	if items[0].AvgEntryPrice < 0.599 || items[0].AvgEntryPrice > 0.601 {
+		t.Fatalf("expected avg entry around 0.60, got %.4f", items[0].AvgEntryPrice)
+	}
 	if items[0].MarkPrice == nil || *items[0].MarkPrice <= 0 {
 		t.Fatalf("expected mark price")
+	}
+	if items[0].LatestTradeAt.IsZero() {
+		t.Fatalf("expected latest trade at")
 	}
 }
 
@@ -247,7 +253,8 @@ func TestGetPnLReport(t *testing.T) {
 	}{
 		{OrderID: "oid-1", Status: "filled", CostUSDC: "10.00", PnLUSDC: ptrString("1.20"), CreatedAt: base},
 		{OrderID: "oid-2", Status: "closed", CostUSDC: "8.00", PnLUSDC: ptrString("-0.80"), CreatedAt: base.Add(2 * time.Hour)},
-		{OrderID: "oid-3", Status: "placed", CostUSDC: "2.00", PnLUSDC: nil, CreatedAt: base.Add(4 * time.Hour)},
+		{OrderID: "oid-3", Status: "closed", CostUSDC: "2.00", PnLUSDC: ptrString("0.00"), CreatedAt: base.Add(3 * time.Hour)},
+		{OrderID: "oid-4", Status: "placed", CostUSDC: "2.00", PnLUSDC: nil, CreatedAt: base.Add(4 * time.Hour)},
 	}
 	for _, it := range inserts {
 		if it.PnLUSDC == nil {
@@ -275,14 +282,17 @@ func TestGetPnLReport(t *testing.T) {
 	if err != nil {
 		t.Fatalf("pnl report: %v", err)
 	}
-	if report.TotalTrades != 3 {
-		t.Fatalf("expected total trades=3, got %d", report.TotalTrades)
+	if report.TotalTrades != 4 {
+		t.Fatalf("expected total trades=4, got %d", report.TotalTrades)
 	}
-	if report.FilledTrades != 2 {
-		t.Fatalf("expected filled trades=2, got %d", report.FilledTrades)
+	if report.FilledTrades != 3 {
+		t.Fatalf("expected filled trades=3, got %d", report.FilledTrades)
 	}
 	if report.WinTrades != 1 || report.LossTrades != 1 {
 		t.Fatalf("unexpected win/loss: %+v", report)
+	}
+	if report.BreakEvenTrades != 1 {
+		t.Fatalf("expected break-even trades=1, got %d", report.BreakEvenTrades)
 	}
 	if report.RealizedPnLUSDC < 0.39 || report.RealizedPnLUSDC > 0.41 {
 		t.Fatalf("expected realized pnl around 0.40, got %.4f", report.RealizedPnLUSDC)
@@ -292,6 +302,103 @@ func TestGetPnLReport(t *testing.T) {
 	}
 	if len(report.Daily) == 0 {
 		t.Fatalf("expected daily pnl rows")
+	}
+	if report.WinRate < 33.3 || report.WinRate > 33.4 {
+		t.Fatalf("expected win rate around 33.33%%, got %.4f", report.WinRate)
+	}
+}
+
+func TestListPositionsShortFlatAndNoPrice(t *testing.T) {
+	db := setupTradeTestDB(t)
+	seedTradeFixtures(t, db)
+	now := time.Now().UTC()
+
+	// market-1 YES -> net short position (SELL > BUY)
+	if err := db.Exec(
+		"INSERT INTO trades(market_id, order_id, side, outcome, price, size, cost_usdc, status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+		"market-1", "oid-s-short", "SELL", "YES", "0.70", "10.00", "7.00", "filled", now,
+	).Error; err != nil {
+		t.Fatalf("insert short trade: %v", err)
+	}
+	if err := db.Exec(
+		"INSERT INTO trades(market_id, order_id, side, outcome, price, size, cost_usdc, status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+		"market-1", "oid-b-cover", "BUY", "YES", "0.60", "4.00", "2.40", "filled", now.Add(1*time.Minute),
+	).Error; err != nil {
+		t.Fatalf("insert cover trade: %v", err)
+	}
+	// market-2 NO -> flat position should be excluded
+	if err := db.Exec(
+		"INSERT INTO trades(market_id, order_id, side, outcome, price, size, cost_usdc, status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+		"market-2", "oid-b-flat", "BUY", "NO", "0.30", "5.00", "1.50", "filled", now,
+	).Error; err != nil {
+		t.Fatalf("insert flat buy: %v", err)
+	}
+	if err := db.Exec(
+		"INSERT INTO trades(market_id, order_id, side, outcome, price, size, cost_usdc, status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+		"market-2", "oid-s-flat", "SELL", "NO", "0.35", "5.00", "1.75", "filled", now.Add(1*time.Minute),
+	).Error; err != nil {
+		t.Fatalf("insert flat sell: %v", err)
+	}
+	// only market-1 has latest mark price
+	if err := db.Exec(
+		"INSERT INTO market_prices(market_id, price_yes, price_no, captured_at) VALUES (?, ?, ?, ?)",
+		"market-1", "0.80", "0.20", now.Add(2*time.Minute),
+	).Error; err != nil {
+		t.Fatalf("insert market price: %v", err)
+	}
+
+	svc := newTradeServiceForTest(db, "http://127.0.0.1:1")
+	items, err := svc.ListPositions(context.Background(), ListPositionsOptions{})
+	if err != nil {
+		t.Fatalf("list positions: %v", err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("expected 1 non-flat position, got %d", len(items))
+	}
+	pos := items[0]
+	if pos.NetSize >= 0 {
+		t.Fatalf("expected net short position, got %.4f", pos.NetSize)
+	}
+	if pos.UnrealizedPnL == nil {
+		t.Fatalf("expected unrealized pnl for short")
+	}
+	if *pos.UnrealizedPnL >= 0 {
+		t.Fatalf("expected negative unrealized pnl for short mark-up, got %.4f", *pos.UnrealizedPnL)
+	}
+
+	// market without price -> mark fields should be nil
+	if err := db.Exec(
+		"INSERT INTO trades(market_id, order_id, side, outcome, price, size, cost_usdc, status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+		"market-3", "oid-no-price", "BUY", "YES", "0.40", "2.00", "0.80", "filled", now.Add(3*time.Minute),
+	).Error; err != nil {
+		t.Fatalf("insert no-price trade: %v", err)
+	}
+	items, err = svc.ListPositions(context.Background(), ListPositionsOptions{MarketID: "market-3"})
+	if err != nil {
+		t.Fatalf("list positions market-3: %v", err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("expected 1 position for market-3, got %d", len(items))
+	}
+	if items[0].MarkPrice != nil || items[0].UnrealizedPnL != nil {
+		t.Fatalf("expected nil mark/unrealized for no-price market: %+v", items[0])
+	}
+}
+
+func TestGetPnLReportInvalidRange(t *testing.T) {
+	db := setupTradeTestDB(t)
+	seedTradeFixtures(t, db)
+	svc := newTradeServiceForTest(db, "http://127.0.0.1:1")
+
+	_, err := svc.GetPnLReport(context.Background(), PnLReportOptions{
+		From: time.Date(2026, 2, 10, 0, 0, 0, 0, time.UTC),
+		To:   time.Date(2026, 2, 9, 0, 0, 0, 0, time.UTC),
+	})
+	if err == nil {
+		t.Fatalf("expected invalid range error")
+	}
+	if !errors.Is(err, ErrTradeInvalidRequest) {
+		t.Fatalf("expected ErrTradeInvalidRequest, got: %v", err)
 	}
 }
 

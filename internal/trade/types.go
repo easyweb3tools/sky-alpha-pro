@@ -54,7 +54,7 @@ type PositionView struct {
 	MarketValueUSD *float64  `json:"market_value_usd,omitempty"`
 	UnrealizedPnL  *float64  `json:"unrealized_pnl,omitempty"`
 	RealizedPnL    float64   `json:"realized_pnl"`
-	UpdatedAt      time.Time `json:"updated_at"`
+	LatestTradeAt  time.Time `json:"latest_trade_at"`
 }
 
 type PnLReportOptions struct {
@@ -76,6 +76,7 @@ type PnLReport struct {
 	FilledTrades     int64      `json:"filled_trades"`
 	WinTrades        int64      `json:"win_trades"`
 	LossTrades       int64      `json:"loss_trades"`
+	BreakEvenTrades  int64      `json:"break_even_trades"`
 	WinRate          float64    `json:"win_rate"`
 	GrossVolumeUSDC  float64    `json:"gross_volume_usdc"`
 	RealizedPnLUSDC  float64    `json:"realized_pnl_usdc"`

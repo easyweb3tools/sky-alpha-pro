@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/ecdsa"
 	"crypto/rand"
+	"database/sql/driver"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -43,6 +44,11 @@ var (
 	ErrTradePersistence    = errors.New("trade persistence failed")
 	ErrTradeConfig         = errors.New("trade configuration error")
 )
+
+type flexTime struct {
+	Time  time.Time
+	Valid bool
+}
 
 type Service struct {
 	cfg        config.TradeConfig
@@ -257,152 +263,173 @@ func (s *Service) GetTradeByID(ctx context.Context, tradeID uint64) (*TradeView,
 }
 
 func (s *Service) ListPositions(ctx context.Context, opts ListPositionsOptions) ([]PositionView, error) {
-	type tradeRow struct {
-		MarketID  string              `gorm:"column:market_id"`
-		Outcome   string              `gorm:"column:outcome"`
-		Side      string              `gorm:"column:side"`
-		Price     decimal.Decimal     `gorm:"column:price"`
-		Size      decimal.Decimal     `gorm:"column:size"`
-		FillPrice decimal.NullDecimal `gorm:"column:fill_price"`
-		FillSize  decimal.NullDecimal `gorm:"column:fill_size"`
-		UpdatedAt time.Time           `gorm:"column:created_at"`
+	type positionRow struct {
+		MarketID      string          `gorm:"column:market_id"`
+		Outcome       string          `gorm:"column:outcome"`
+		NetSize       decimal.Decimal `gorm:"column:net_size"`
+		NetCost       decimal.Decimal `gorm:"column:net_cost"`
+		BuySize       decimal.Decimal `gorm:"column:buy_size"`
+		BuyCost       decimal.Decimal `gorm:"column:buy_cost"`
+		RealizedPnL   decimal.Decimal `gorm:"column:realized_pnl"`
+		LatestTradeAt flexTime        `gorm:"column:latest_trade_at"`
 	}
 	type priceRow struct {
 		MarketID string          `gorm:"column:market_id"`
 		PriceYes decimal.Decimal `gorm:"column:price_yes"`
 		PriceNo  decimal.Decimal `gorm:"column:price_no"`
 	}
-	type pnlRow struct {
-		MarketID string              `gorm:"column:market_id"`
-		Outcome  string              `gorm:"column:outcome"`
-		PnLUSDC  decimal.NullDecimal `gorm:"column:pnl_usdc"`
-	}
-	type positionAgg struct {
-		MarketID      string
-		Outcome       string
-		NetSize       decimal.Decimal
-		NetCost       decimal.Decimal
-		LatestUpdated time.Time
-	}
+	qtyExpr := "CASE WHEN fill_size IS NOT NULL AND fill_size > 0 THEN fill_size ELSE size END"
+	priceExpr := "CASE WHEN fill_price IS NOT NULL AND fill_price > 0 THEN fill_price ELSE price END"
+	signedQtyExpr := "CASE WHEN side = 'BUY' THEN " + qtyExpr + " WHEN side = 'SELL' THEN -(" + qtyExpr + ") ELSE 0 END"
+	signedCostExpr := "CASE WHEN side = 'BUY' THEN (" + qtyExpr + " * " + priceExpr + ") WHEN side = 'SELL' THEN -(" + qtyExpr + " * " + priceExpr + ") ELSE 0 END"
+	buyQtyExpr := "CASE WHEN side = 'BUY' THEN " + qtyExpr + " ELSE 0 END"
+	buyCostExpr := "CASE WHEN side = 'BUY' THEN (" + qtyExpr + " * " + priceExpr + ") ELSE 0 END"
 
 	query := s.db.WithContext(ctx).
 		Table("trades").
-		Select("market_id, outcome, side, price, size, fill_price, fill_size, created_at").
-		Where("status IN ?", []string{"filled", "partially_filled"})
+		Select(
+			"market_id, "+
+				"UPPER(outcome) AS outcome, "+
+				"COALESCE(SUM("+signedQtyExpr+"), CAST(0 AS NUMERIC)) AS net_size, "+
+				"COALESCE(SUM("+signedCostExpr+"), CAST(0 AS NUMERIC)) AS net_cost, "+
+				"COALESCE(SUM("+buyQtyExpr+"), CAST(0 AS NUMERIC)) AS buy_size, "+
+				"COALESCE(SUM("+buyCostExpr+"), CAST(0 AS NUMERIC)) AS buy_cost, "+
+				"COALESCE(SUM(COALESCE(pnl_usdc, 0)), CAST(0 AS NUMERIC)) AS realized_pnl, "+
+				"MAX(created_at) AS latest_trade_at",
+		).
+		Where("status IN ?", []string{"filled", "partially_filled"}).
+		Group("market_id, UPPER(outcome)").
+		Order("market_id ASC, UPPER(outcome) ASC")
 	if marketID := strings.TrimSpace(opts.MarketID); marketID != "" {
 		query = query.Where("market_id = ?", marketID)
 	}
 
-	var rows []tradeRow
+	var rows []positionRow
 	if err := query.Scan(&rows).Error; err != nil {
 		return nil, err
 	}
 
-	aggs := make(map[string]*positionAgg)
-	for _, row := range rows {
-		qty := row.Size
-		if row.FillSize.Valid && row.FillSize.Decimal.GreaterThan(decimal.Zero) {
-			qty = row.FillSize.Decimal
-		}
-		execPrice := row.Price
-		if row.FillPrice.Valid && row.FillPrice.Decimal.GreaterThan(decimal.Zero) {
-			execPrice = row.FillPrice.Decimal
-		}
-		if qty.LessThanOrEqual(decimal.Zero) || execPrice.LessThanOrEqual(decimal.Zero) {
-			continue
-		}
-
-		sign := decimal.NewFromInt(1)
-		if strings.EqualFold(row.Side, orderSideSell) {
-			sign = decimal.NewFromInt(-1)
-		}
-		key := row.MarketID + "|" + strings.ToUpper(row.Outcome)
-		agg := aggs[key]
-		if agg == nil {
-			agg = &positionAgg{
-				MarketID: row.MarketID,
-				Outcome:  strings.ToUpper(row.Outcome),
-			}
-			aggs[key] = agg
-		}
-		agg.NetSize = agg.NetSize.Add(qty.Mul(sign))
-		agg.NetCost = agg.NetCost.Add(qty.Mul(execPrice).Mul(sign))
-		if row.UpdatedAt.After(agg.LatestUpdated) {
-			agg.LatestUpdated = row.UpdatedAt
-		}
-	}
-
 	priceMap := make(map[string]priceRow)
-	sub := s.db.WithContext(ctx).
-		Table("market_prices").
-		Select("market_id, MAX(captured_at) AS max_captured_at").
-		Group("market_id")
 	var latestPrices []priceRow
-	if err := s.db.WithContext(ctx).
-		Table("market_prices mp").
-		Select("mp.market_id, mp.price_yes, mp.price_no").
-		Joins("JOIN (?) latest ON mp.market_id = latest.market_id AND mp.captured_at = latest.max_captured_at", sub).
-		Scan(&latestPrices).Error; err == nil {
-		for _, row := range latestPrices {
-			priceMap[row.MarketID] = row
-		}
-	}
-
-	realizedByKey := make(map[string]decimal.Decimal)
-	pnlQuery := s.db.WithContext(ctx).
-		Table("trades").
-		Select("market_id, outcome, pnl_usdc").
-		Where("pnl_usdc IS NOT NULL")
+	priceQuery := s.db.WithContext(ctx).
+		Table("(" +
+			"SELECT market_id, price_yes, price_no, " +
+			"ROW_NUMBER() OVER (PARTITION BY market_id ORDER BY captured_at DESC, id DESC) AS rn " +
+			"FROM market_prices" +
+			") ranked").
+		Select("market_id, price_yes, price_no").
+		Where("rn = 1")
 	if marketID := strings.TrimSpace(opts.MarketID); marketID != "" {
-		pnlQuery = pnlQuery.Where("market_id = ?", marketID)
+		priceQuery = priceQuery.Where("market_id = ?", marketID)
 	}
-	var pnlRows []pnlRow
-	if err := pnlQuery.Scan(&pnlRows).Error; err == nil {
-		for _, row := range pnlRows {
-			if !row.PnLUSDC.Valid {
-				continue
-			}
-			key := row.MarketID + "|" + strings.ToUpper(row.Outcome)
-			realizedByKey[key] = realizedByKey[key].Add(row.PnLUSDC.Decimal)
-		}
+	if err := priceQuery.Scan(&latestPrices).Error; err != nil {
+		return nil, err
+	}
+	for _, row := range latestPrices {
+		priceMap[row.MarketID] = row
 	}
 
-	positions := make([]PositionView, 0, len(aggs))
-	for key, agg := range aggs {
-		if agg.NetSize.IsZero() {
+	positions := make([]PositionView, 0, len(rows))
+	for _, row := range rows {
+		if row.NetSize.IsZero() {
 			continue
 		}
-		absSize := agg.NetSize.Abs()
 		avgEntry := decimal.Zero
-		if !absSize.IsZero() {
-			avgEntry = agg.NetCost.Abs().Div(absSize)
-		}
-		item := PositionView{
-			MarketID:      agg.MarketID,
-			Outcome:       agg.Outcome,
-			NetSize:       agg.NetSize.InexactFloat64(),
-			AvgEntryPrice: avgEntry.InexactFloat64(),
-			RealizedPnL:   realizedByKey[key].InexactFloat64(),
-			UpdatedAt:     agg.LatestUpdated,
+		if row.BuySize.GreaterThan(decimal.Zero) {
+			avgEntry = row.BuyCost.Div(row.BuySize)
 		}
 
-		if mp, ok := priceMap[agg.MarketID]; ok {
+		item := PositionView{
+			MarketID:      row.MarketID,
+			Outcome:       row.Outcome,
+			NetSize:       row.NetSize.InexactFloat64(),
+			AvgEntryPrice: avgEntry.InexactFloat64(),
+			RealizedPnL:   row.RealizedPnL.InexactFloat64(),
+		}
+		if row.LatestTradeAt.Valid {
+			item.LatestTradeAt = row.LatestTradeAt.Time.UTC()
+		}
+
+		if mp, ok := priceMap[row.MarketID]; ok {
 			mark := mp.PriceNo
-			if strings.EqualFold(agg.Outcome, outcomeYes) {
+			if strings.EqualFold(row.Outcome, outcomeYes) {
 				mark = mp.PriceYes
 			}
 			if mark.GreaterThan(decimal.Zero) {
 				v := mark.InexactFloat64()
 				item.MarkPrice = &v
-				mv := agg.NetSize.Mul(mark).InexactFloat64()
+				mv := row.NetSize.Mul(mark).InexactFloat64()
 				item.MarketValueUSD = &mv
-				upnl := agg.NetSize.Mul(mark).Sub(agg.NetCost).InexactFloat64()
+				upnl := row.NetSize.Mul(mark).Sub(row.NetCost).InexactFloat64()
 				item.UnrealizedPnL = &upnl
 			}
 		}
 		positions = append(positions, item)
 	}
 	return positions, nil
+}
+
+func (t *flexTime) Scan(src any) error {
+	switch v := src.(type) {
+	case nil:
+		t.Valid = false
+		t.Time = time.Time{}
+		return nil
+	case time.Time:
+		t.Valid = true
+		t.Time = v
+		return nil
+	case string:
+		parsed, err := parseFlexTimeString(v)
+		if err != nil {
+			return err
+		}
+		t.Valid = true
+		t.Time = parsed
+		return nil
+	case []byte:
+		parsed, err := parseFlexTimeString(string(v))
+		if err != nil {
+			return err
+		}
+		t.Valid = true
+		t.Time = parsed
+		return nil
+	default:
+		return fmt.Errorf("unsupported time scan type %T", src)
+	}
+}
+
+func (t flexTime) Value() (driver.Value, error) {
+	if !t.Valid {
+		return nil, nil
+	}
+	return t.Time, nil
+}
+
+func parseFlexTimeString(raw string) (time.Time, error) {
+	s := strings.TrimSpace(raw)
+	if s == "" {
+		return time.Time{}, fmt.Errorf("empty time string")
+	}
+	layouts := []string{
+		time.RFC3339Nano,
+		"2006-01-02 15:04:05.999999999-07:00",
+		"2006-01-02 15:04:05.999999999Z07:00",
+		"2006-01-02 15:04:05.999999999",
+		"2006-01-02 15:04:05",
+		"2006-01-02T15:04:05.999999999",
+		"2006-01-02T15:04:05",
+	}
+	for _, layout := range layouts {
+		if tm, err := time.Parse(layout, s); err == nil {
+			if strings.Contains(layout, "Z07:00") || strings.Contains(layout, "-07:00") {
+				return tm, nil
+			}
+			return time.Date(tm.Year(), tm.Month(), tm.Day(), tm.Hour(), tm.Minute(), tm.Second(), tm.Nanosecond(), time.UTC), nil
+		}
+	}
+	return time.Time{}, fmt.Errorf("unsupported time format: %s", s)
 }
 
 func (s *Service) GetPnLReport(ctx context.Context, opts PnLReportOptions) (*PnLReport, error) {
@@ -461,13 +488,15 @@ func (s *Service) GetPnLReport(ctx context.Context, opts PnLReportOptions) (*PnL
 				report.WinTrades++
 			case -1:
 				report.LossTrades++
+			default:
+				report.BreakEvenTrades++
 			}
 		}
 	}
 	report.GrossVolumeUSDC = grossVolume.InexactFloat64()
 	report.RealizedPnLUSDC = realized.InexactFloat64()
 	report.OpenExposureUSDC = openExposure.InexactFloat64()
-	decisions := report.WinTrades + report.LossTrades
+	decisions := report.WinTrades + report.LossTrades + report.BreakEvenTrades
 	if decisions > 0 {
 		report.WinRate = float64(report.WinTrades) / float64(decisions) * 100
 	}
@@ -483,27 +512,28 @@ func (s *Service) GetPnLReport(ctx context.Context, opts PnLReportOptions) (*PnL
 		Table("trades").
 		Select(
 			"DATE(created_at) AS date, "+
-				"COALESCE(SUM(pnl_usdc), 0) AS realized_pnl, "+
-				"COALESCE(SUM(cost_usdc), 0) AS gross_volume, "+
+				"COALESCE(SUM(pnl_usdc), CAST(0 AS NUMERIC)) AS realized_pnl, "+
+				"COALESCE(SUM(cost_usdc), CAST(0 AS NUMERIC)) AS gross_volume, "+
 				"SUM(CASE WHEN status IN ('filled','closed') THEN 1 ELSE 0 END) AS filled_trades",
 		).
 		Where("created_at >= ? AND created_at <= ?", from, to).
 		Group("DATE(created_at)").
 		Order("DATE(created_at) ASC").
-		Scan(&dailyRows).Error; err == nil {
-		for _, row := range dailyRows {
-			item := DailyPnL{
-				Date:         row.Date,
-				FilledTrades: row.FilledCnt,
-			}
-			if row.RealizedPnL.Valid {
-				item.RealizedPnL = row.RealizedPnL.Decimal.InexactFloat64()
-			}
-			if row.GrossVolume.Valid {
-				item.GrossVolume = row.GrossVolume.Decimal.InexactFloat64()
-			}
-			report.Daily = append(report.Daily, item)
+		Scan(&dailyRows).Error; err != nil {
+		return nil, err
+	}
+	for _, row := range dailyRows {
+		item := DailyPnL{
+			Date:         row.Date,
+			FilledTrades: row.FilledCnt,
 		}
+		if row.RealizedPnL.Valid {
+			item.RealizedPnL = row.RealizedPnL.Decimal.InexactFloat64()
+		}
+		if row.GrossVolume.Valid {
+			item.GrossVolume = row.GrossVolume.Decimal.InexactFloat64()
+		}
+		report.Daily = append(report.Daily, item)
 	}
 
 	return report, nil
