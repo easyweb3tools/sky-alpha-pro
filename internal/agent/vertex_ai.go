@@ -57,6 +57,9 @@ type vertexUsage struct {
 
 func newVertexAIClient(cfg config.AgentConfig, log *zap.Logger) (*vertexAIClient, error) {
 	project := strings.TrimSpace(cfg.VertexProject)
+	if project == "" {
+		return nil, fmt.Errorf("agent.vertex_project is required for vertex ai")
+	}
 	location := strings.TrimSpace(cfg.VertexLocation)
 	if location == "" {
 		location = defaultVertexLocation

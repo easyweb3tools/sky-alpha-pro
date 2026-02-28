@@ -232,7 +232,8 @@ agent:
 
 Agent analysis now defaults to Vertex AI (`google.golang.org/genai`, `BackendVertexAI`).
 If Vertex initialization or request fails, the service degrades to deterministic rule-based reasoning for continuity.
-Credentials use Google ADC (`GOOGLE_APPLICATION_CREDENTIALS` or workload identity).
+`agent.vertex_project` is required and must be configured in YAML (project no longer depends on `GOOGLE_CLOUD_PROJECT`/`GOOGLE_CLOUD_LOCATION` env vars).
+Credentials use Google ADC (recommended: attach a service account on GCE/Cloud Run; local dev can use `gcloud auth application-default login`).
 
 ## Trade Execution (W7)
 
