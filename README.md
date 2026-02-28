@@ -343,6 +343,27 @@ curl "http://127.0.0.1:8080/api/v1/players/0xabc.../compare"
 - `chain watch` 保留了单周期超时控制，并在可重试故障上自动重试后再进入下一轮。
 - 新增关键链路 API 集成测试：`signals/generate -> agent/analyze -> signals/list`。
 
+## Auto Scheduler & Metrics
+
+- `serve` 启动后会自动拉起内置 scheduler（默认开启）：
+  - `market_sync`（5m）
+  - `weather_forecast`（15m）
+  - `chain_scan`（2m，若 `chain.rpc_url` 为空则自动跳过注册）
+  - `sim_cycle`（默认关闭；开启后仅执行 paper trade，且默认跳过市场同步）
+- 指标端点默认：`GET /metrics`
+  - 关键指标包括：
+    - `sky_alpha_scheduler_job_runs_total{job,status}`
+    - `sky_alpha_scheduler_job_duration_seconds{job,status}`
+    - `sky_alpha_scheduler_job_last_success_timestamp_seconds{job}`
+    - `sky_alpha_fetch_records_total{job,entity,result}`
+- 相关配置见：
+  - `scheduler.*`
+  - `metrics.*`
+  - `.env.example` 中 `SKY_ALPHA_SCHEDULER_*` / `SKY_ALPHA_METRICS_*`
+- 锁说明：
+  - 当前版本仅实现 `scheduler.lock_mode=local`（单实例进程内锁）
+  - 多实例 `postgres_advisory` 计划在后续阶段补齐
+
 验证命令：
 
 ```bash

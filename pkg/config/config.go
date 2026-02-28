@@ -10,17 +10,19 @@ import (
 )
 
 type Config struct {
-	App      AppConfig      `mapstructure:"app"`
-	Server   ServerConfig   `mapstructure:"server"`
-	Market   MarketConfig   `mapstructure:"market"`
-	Weather  WeatherConfig  `mapstructure:"weather"`
-	Signal   SignalConfig   `mapstructure:"signal"`
-	Agent    AgentConfig    `mapstructure:"agent"`
-	Trade    TradeConfig    `mapstructure:"trade"`
-	Chain    ChainConfig    `mapstructure:"chain"`
-	Sim      SimConfig      `mapstructure:"sim"`
-	Database DatabaseConfig `mapstructure:"database"`
-	Log      LogConfig      `mapstructure:"log"`
+	App       AppConfig       `mapstructure:"app"`
+	Server    ServerConfig    `mapstructure:"server"`
+	Market    MarketConfig    `mapstructure:"market"`
+	Weather   WeatherConfig   `mapstructure:"weather"`
+	Signal    SignalConfig    `mapstructure:"signal"`
+	Agent     AgentConfig     `mapstructure:"agent"`
+	Trade     TradeConfig     `mapstructure:"trade"`
+	Chain     ChainConfig     `mapstructure:"chain"`
+	Sim       SimConfig       `mapstructure:"sim"`
+	Scheduler SchedulerConfig `mapstructure:"scheduler"`
+	Metrics   MetricsConfig   `mapstructure:"metrics"`
+	Database  DatabaseConfig  `mapstructure:"database"`
+	Log       LogConfig       `mapstructure:"log"`
 }
 
 type AppConfig struct {
@@ -122,6 +124,54 @@ type ChainConfig struct {
 	BotMinTrades           int           `mapstructure:"bot_min_trades"`
 	BotMaxAvgIntervalSec   float64       `mapstructure:"bot_max_avg_interval_sec"`
 	WatchInterval          time.Duration `mapstructure:"watch_interval"`
+}
+
+type SchedulerConfig struct {
+	Enabled            bool                `mapstructure:"enabled"`
+	RunOnStart         bool                `mapstructure:"run_on_start"`
+	LockMode           string              `mapstructure:"lock_mode"`
+	LockKeyPrefix      int64               `mapstructure:"lock_key_prefix"`
+	DefaultTimeout     time.Duration       `mapstructure:"default_timeout"`
+	DefaultJitterRatio float64             `mapstructure:"default_jitter_ratio"`
+	Jobs               SchedulerJobsConfig `mapstructure:"jobs"`
+}
+
+type SchedulerJobsConfig struct {
+	MarketSync      SchedulerJobConfig        `mapstructure:"market_sync"`
+	WeatherForecast SchedulerWeatherJobConfig `mapstructure:"weather_forecast"`
+	ChainScan       SchedulerChainJobConfig   `mapstructure:"chain_scan"`
+	SimCycle        SchedulerJobConfig        `mapstructure:"sim_cycle"`
+}
+
+type SchedulerJobConfig struct {
+	Enabled   bool          `mapstructure:"enabled"`
+	Interval  time.Duration `mapstructure:"interval"`
+	Timeout   time.Duration `mapstructure:"timeout"`
+	Immediate bool          `mapstructure:"immediate"`
+}
+
+type SchedulerWeatherJobConfig struct {
+	Enabled         bool          `mapstructure:"enabled"`
+	Interval        time.Duration `mapstructure:"interval"`
+	Timeout         time.Duration `mapstructure:"timeout"`
+	Immediate       bool          `mapstructure:"immediate"`
+	CityConcurrency int           `mapstructure:"city_concurrency"`
+	Days            int           `mapstructure:"days"`
+	Source          string        `mapstructure:"source"`
+}
+
+type SchedulerChainJobConfig struct {
+	Enabled        bool          `mapstructure:"enabled"`
+	Interval       time.Duration `mapstructure:"interval"`
+	Timeout        time.Duration `mapstructure:"timeout"`
+	Immediate      bool          `mapstructure:"immediate"`
+	LookbackBlocks uint64        `mapstructure:"lookback_blocks"`
+	MaxTx          int           `mapstructure:"max_tx"`
+}
+
+type MetricsConfig struct {
+	Enabled bool   `mapstructure:"enabled"`
+	Path    string `mapstructure:"path"`
 }
 
 type LogConfig struct {
@@ -232,6 +282,38 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("chain.bot_min_trades", 8)
 	v.SetDefault("chain.bot_max_avg_interval_sec", 8.0)
 	v.SetDefault("chain.watch_interval", "30s")
+
+	v.SetDefault("scheduler.enabled", true)
+	v.SetDefault("scheduler.run_on_start", true)
+	v.SetDefault("scheduler.lock_mode", "local")
+	v.SetDefault("scheduler.lock_key_prefix", 7300)
+	v.SetDefault("scheduler.default_timeout", "60s")
+	v.SetDefault("scheduler.default_jitter_ratio", 0.1)
+	v.SetDefault("scheduler.jobs.market_sync.enabled", true)
+	v.SetDefault("scheduler.jobs.market_sync.interval", "5m")
+	v.SetDefault("scheduler.jobs.market_sync.timeout", "90s")
+	v.SetDefault("scheduler.jobs.market_sync.immediate", true)
+	v.SetDefault("scheduler.jobs.weather_forecast.enabled", true)
+	v.SetDefault("scheduler.jobs.weather_forecast.interval", "15m")
+	v.SetDefault("scheduler.jobs.weather_forecast.timeout", "120s")
+	v.SetDefault("scheduler.jobs.weather_forecast.immediate", true)
+	v.SetDefault("scheduler.jobs.weather_forecast.city_concurrency", 6)
+	v.SetDefault("scheduler.jobs.weather_forecast.days", 7)
+	v.SetDefault("scheduler.jobs.weather_forecast.source", "all")
+	v.SetDefault("scheduler.jobs.chain_scan.enabled", true)
+	v.SetDefault("scheduler.jobs.chain_scan.interval", "2m")
+	v.SetDefault("scheduler.jobs.chain_scan.timeout", "90s")
+	v.SetDefault("scheduler.jobs.chain_scan.immediate", true)
+	v.SetDefault("scheduler.jobs.chain_scan.lookback_blocks", uint64(0))
+	v.SetDefault("scheduler.jobs.chain_scan.max_tx", 0)
+
+	v.SetDefault("scheduler.jobs.sim_cycle.enabled", false)
+	v.SetDefault("scheduler.jobs.sim_cycle.interval", "5m")
+	v.SetDefault("scheduler.jobs.sim_cycle.timeout", "120s")
+	v.SetDefault("scheduler.jobs.sim_cycle.immediate", false)
+
+	v.SetDefault("metrics.enabled", true)
+	v.SetDefault("metrics.path", "/metrics")
 
 	v.SetDefault("database.host", "127.0.0.1")
 	v.SetDefault("database.port", 5432)

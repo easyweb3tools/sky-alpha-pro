@@ -10,8 +10,12 @@ import (
 	"github.com/spf13/cobra"
 	"go.uber.org/zap"
 
+	"sky-alpha-pro/internal/scheduler"
 	"sky-alpha-pro/internal/server"
+	"sky-alpha-pro/internal/sim"
+	"sky-alpha-pro/internal/trade"
 	"sky-alpha-pro/pkg/database"
+	"sky-alpha-pro/pkg/metrics"
 )
 
 func newServeCmd() *cobra.Command {
@@ -32,7 +36,12 @@ func newServeCmd() *cobra.Command {
 				return err
 			}
 
-			handler := server.NewRouter(appConfig, appLogger, db)
+			metricReg := metrics.New(appConfig.Metrics)
+			services := server.NewServices(appConfig, appLogger, db)
+			if services.Chain != nil {
+				defer services.Chain.Close()
+			}
+			handler := server.NewRouterWithServices(appConfig, appLogger, db, metricReg, services)
 			httpServer := &http.Server{
 				Addr:              fmt.Sprintf("%s:%d", appConfig.Server.Host, appConfig.Server.Port),
 				Handler:           handler,
@@ -40,6 +49,21 @@ func newServeCmd() *cobra.Command {
 				ReadTimeout:       appConfig.Server.ReadTimeout,
 				WriteTimeout:      appConfig.Server.WriteTimeout,
 			}
+
+			sigCtx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+			defer stop()
+
+			// Build dedicated sim service for scheduler paper trading.
+			// Reuse shared market/weather/signal services to avoid duplicated upstream state.
+			simTradeCfg := appConfig.Trade
+			simTradeCfg.PaperMode = true
+			simTradeCfg.ConfirmationRequired = false
+			simTradeSvc := trade.NewService(simTradeCfg, appConfig.Market, db, appLogger, services.Signal)
+			simSvc := sim.NewService(appConfig.Sim, db, appLogger, services.Market, services.Weather, services.Signal, simTradeSvc)
+
+			schedulerMgr := scheduler.NewManager(appConfig.Scheduler, appLogger, metricReg)
+			scheduler.RegisterDefaultJobs(schedulerMgr, appConfig, db, services.Market, services.Weather, services.Chain, simSvc, appLogger)
+			schedulerMgr.Start(sigCtx)
 
 			errCh := make(chan error, 1)
 			go func() {
@@ -52,16 +76,16 @@ func newServeCmd() *cobra.Command {
 				}
 			}()
 
-			sigCtx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-			defer stop()
-
 			select {
 			case <-sigCtx.Done():
+				schedulerMgr.Wait()
 				ctx, cancel := context.WithTimeout(context.Background(), appConfig.Server.ShutdownTimeout)
 				defer cancel()
 				appLogger.Info("shutting down http server")
 				return httpServer.Shutdown(ctx)
 			case err := <-errCh:
+				stop()
+				schedulerMgr.Wait()
 				return err
 			}
 		},

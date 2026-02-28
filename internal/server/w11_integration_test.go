@@ -15,6 +15,7 @@ import (
 
 	"sky-alpha-pro/internal/model"
 	"sky-alpha-pro/pkg/config"
+	"sky-alpha-pro/pkg/metrics"
 )
 
 func TestW11CriticalPathSignalAndAgentAPI(t *testing.T) {
@@ -55,7 +56,7 @@ func TestW11CriticalPathSignalAndAgentAPI(t *testing.T) {
 		},
 	}
 
-	router := NewRouter(cfg, zap.NewNop(), db)
+	router := NewRouter(cfg, zap.NewNop(), db, metrics.New(cfg.Metrics))
 
 	w := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/signals/generate?limit=10", nil)

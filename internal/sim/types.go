@@ -11,6 +11,10 @@ type RunConfig struct {
 	MaxCycles    int
 }
 
+type RunCycleOptions struct {
+	SkipMarketSync bool
+}
+
 type CycleResult struct {
 	Cycle            int      `json:"cycle"`
 	MarketsSynced    int      `json:"markets_synced"`
