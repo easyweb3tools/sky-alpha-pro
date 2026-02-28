@@ -218,6 +218,22 @@ curl -X POST http://127.0.0.1:8080/api/v1/agent/analyze \
 curl "http://127.0.0.1:8080/api/v1/agent/signals?limit=20&min_edge=5"
 ```
 
+Vertex AI (Gemini via Go SDK) config:
+
+```yaml
+agent:
+  vertex_project: "your-gcp-project-id"
+  vertex_location: "us-central1"
+  vertex_model: "gemini-2.5-flash"
+  vertex_temperature: 0.2
+  vertex_max_output_tokens: 600
+  vertex_timeout: 15s
+```
+
+Agent analysis now defaults to Vertex AI (`google.golang.org/genai`, `BackendVertexAI`).
+If Vertex initialization or request fails, the service degrades to deterministic rule-based reasoning for continuity.
+Credentials use Google ADC (`GOOGLE_APPLICATION_CREDENTIALS` or workload identity).
+
 ## Trade Execution (W7)
 
 CLI:
@@ -319,6 +335,22 @@ curl "http://127.0.0.1:8080/api/v1/players/0xabc..."
 curl "http://127.0.0.1:8080/api/v1/players/0xabc.../positions?limit=20"
 curl "http://127.0.0.1:8080/api/v1/players/0xabc.../compare"
 ```
+
+## Stability & Integration (W11)
+
+- `market sync`、`chain scan`、`chain watch` 增加了指数退避重试（默认最多 3 次），用于吸收短时网络/RPC 抖动。
+- `chain watch` 保留了单周期超时控制，并在可重试故障上自动重试后再进入下一轮。
+- 新增关键链路 API 集成测试：`signals/generate -> agent/analyze -> signals/list`。
+
+验证命令：
+
+```bash
+make test-w11
+```
+
+稳定性报告：
+
+- [W11 关键链路稳定性报告](docs/W11-关键链路稳定性报告.md)
 
 ## Container
 

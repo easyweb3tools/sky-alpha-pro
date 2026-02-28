@@ -1,6 +1,6 @@
 APP_NAME := sky-alpha-pro
 
-.PHONY: tidy build test run db-migrate market-sync signal-generate signal-list agent-analyze agent-signals trade-buy trade-sell trade-cancel trade-list
+.PHONY: tidy build test test-w11 run db-migrate market-sync signal-generate signal-list agent-analyze agent-signals trade-buy trade-sell trade-cancel trade-list
 
 tidy:
 	go mod tidy
@@ -10,6 +10,10 @@ build:
 
 test:
 	go test ./...
+
+test-w11:
+	go test ./internal/cli -run TestRunWithRetry -count=1
+	go test ./internal/server -run TestW11CriticalPathSignalAndAgentAPI -count=1
 
 run:
 	go run ./cmd/sky-alpha-pro serve --config ./configs/config.yaml

@@ -27,6 +27,7 @@ const (
 	defaultMarketTimeout      = 20 * time.Second
 	defaultForecastDaysCap    = 10
 	defaultStaleHoursLimit    = 24.0
+	ruleFallbackModelName     = "rule-based-fallback-v1"
 )
 
 type Service struct {
@@ -35,15 +36,22 @@ type Service struct {
 	log       *zap.Logger
 	weather   *weather.Service
 	signalSvc *signal.Service
+	vertexAI  *vertexAIClient
 }
 
 func NewService(cfg config.AgentConfig, db *gorm.DB, log *zap.Logger, weatherSvc *weather.Service, signalSvc *signal.Service) *Service {
+	vertexAI, err := newVertexAIClient(cfg, log)
+	if err != nil && log != nil {
+		log.Warn("vertex ai init failed; fallback to rule-based mode", zap.Error(err))
+	}
+
 	return &Service{
 		cfg:       cfg,
 		db:        db,
 		log:       log,
 		weather:   weatherSvc,
 		signalSvc: signalSvc,
+		vertexAI:  vertexAI,
 	}
 }
 
@@ -213,6 +221,9 @@ func (s *Service) analyzeMarket(ctx context.Context, sessionID string, m model.M
 		edgePct        = 0.0
 		confidence     = 50.0
 		reasoning      = "insufficient data to compute edge; default hold"
+		usedModel      = ruleFallbackModelName
+		promptTokens   = 0
+		outputTokens   = 0
 	)
 	if signalErr == nil && generatedSignal != nil {
 		ourProbability = generatedSignal.OurEstimate
@@ -242,6 +253,36 @@ func (s *Service) analyzeMarket(ctx context.Context, sessionID string, m model.M
 	}
 
 	recommendation := buildRecommendation(edgePct, priceYes)
+	if s.vertexAI != nil {
+		toolStart = time.Now()
+		vertexResult, usage, vertexErr := s.vertexAI.Analyze(ctx, vertexPromptInput{
+			Question:         m.Question,
+			City:             city,
+			ForecastSummary:  forecastSummary,
+			MarketPriceYes:   priceYes,
+			OurProbability:   ourProbability,
+			EdgePct:          edgePct,
+			Confidence:       confidence,
+			Recommendation:   recommendation,
+			RiskFactors:      riskFactors,
+			DeterministicRsn: reasoning,
+		})
+		toolCalls = append(toolCalls, newToolCall("vertex_ai_generate", map[string]any{
+			"project": s.cfg.VertexProject,
+			"model":   s.vertexAI.ModelName(),
+		}, toolStart, vertexErr))
+		if vertexErr != nil {
+			riskFactors = append(riskFactors, "vertex ai unavailable: "+vertexErr.Error())
+		} else {
+			usedModel = s.vertexAI.ModelName()
+			promptTokens = usage.PromptTokens
+			outputTokens = usage.CompletionTokens
+			recommendation = vertexResult.Recommendation
+			reasoning = vertexResult.Reasoning
+			riskFactors = mergeUniqueStrings(riskFactors, vertexResult.RiskFactors)
+		}
+	}
+
 	if depth == DepthFull && len(forecastValues) > 0 {
 		reasoning = reasoning + "; forecasts: " + forecastSummary
 	}
@@ -264,7 +305,7 @@ func (s *Service) analyzeMarket(ctx context.Context, sessionID string, m model.M
 		},
 	}
 
-	if err := s.persistAgentLog(ctx, sessionID, m.ID, item, time.Since(start)); err != nil {
+	if err := s.persistAgentLog(ctx, sessionID, m.ID, item, time.Since(start), usedModel, promptTokens, outputTokens); err != nil {
 		s.log.Warn("persist agent log failed", zap.Error(err), zap.String("market_id", m.ID))
 	}
 	return item, nil
@@ -337,7 +378,7 @@ func (s *Service) loadLatestSignalForMarket(ctx context.Context, marketID string
 	}, nil
 }
 
-func (s *Service) persistAgentLog(ctx context.Context, sessionID string, marketID string, item *AnalyzeItem, elapsed time.Duration) error {
+func (s *Service) persistAgentLog(ctx context.Context, sessionID string, marketID string, item *AnalyzeItem, elapsed time.Duration, modelName string, promptTokens int, completionTokens int) error {
 	if item == nil {
 		return nil
 	}
@@ -351,15 +392,17 @@ func (s *Service) persistAgentLog(ctx context.Context, sessionID string, marketI
 	}
 
 	row := model.AgentLog{
-		SessionID:  sessionID,
-		MarketID:   marketID,
-		Action:     "analyze",
-		Model:      s.cfg.Model,
-		ToolCalls:  datatypes.JSON(toolCallsJSON),
-		Reasoning:  item.Analysis.Reasoning,
-		Result:     datatypes.JSON(resultJSON),
-		DurationMS: int(elapsed.Milliseconds()),
-		CreatedAt:  time.Now().UTC(),
+		SessionID:        sessionID,
+		MarketID:         marketID,
+		Action:           "analyze",
+		Model:            modelName,
+		PromptTokens:     promptTokens,
+		CompletionTokens: completionTokens,
+		ToolCalls:        datatypes.JSON(toolCallsJSON),
+		Reasoning:        item.Analysis.Reasoning,
+		Result:           datatypes.JSON(resultJSON),
+		DurationMS:       int(elapsed.Milliseconds()),
+		CreatedAt:        time.Now().UTC(),
 	}
 	return s.db.WithContext(ctx).Create(&row).Error
 }
@@ -435,4 +478,50 @@ func daysUntil(targetDate time.Time, maxDays int) int {
 		return maxDays
 	}
 	return days
+}
+
+func mergeUniqueStrings(base []string, values []string) []string {
+	if len(values) == 0 {
+		return base
+	}
+	seen := make(map[string]struct{}, len(base)+len(values))
+	out := make([]string, 0, len(base)+len(values))
+	for _, item := range base {
+		v := strings.TrimSpace(item)
+		if v == "" {
+			continue
+		}
+		if _, ok := seen[v]; ok {
+			continue
+		}
+		seen[v] = struct{}{}
+		out = append(out, v)
+	}
+	for _, item := range values {
+		v := strings.TrimSpace(item)
+		if v == "" {
+			continue
+		}
+		if _, ok := seen[v]; ok {
+			continue
+		}
+		seen[v] = struct{}{}
+		out = append(out, v)
+	}
+	return out
+}
+
+func normalizeStringSlice(values []string) []string {
+	if len(values) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(values))
+	for _, item := range values {
+		v := strings.TrimSpace(item)
+		if v == "" {
+			continue
+		}
+		out = append(out, v)
+	}
+	return out
 }

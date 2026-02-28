@@ -78,11 +78,16 @@ type SignalConfig struct {
 }
 
 type AgentConfig struct {
-	Model           string        `mapstructure:"model"`
-	AnalyzeLimit    int           `mapstructure:"analyze_limit"`
-	Concurrency     int           `mapstructure:"concurrency"`
-	MarketTimeout   time.Duration `mapstructure:"market_timeout"`
-	MaxForecastDays int           `mapstructure:"max_forecast_days"`
+	AnalyzeLimit          int           `mapstructure:"analyze_limit"`
+	Concurrency           int           `mapstructure:"concurrency"`
+	MarketTimeout         time.Duration `mapstructure:"market_timeout"`
+	MaxForecastDays       int           `mapstructure:"max_forecast_days"`
+	VertexProject         string        `mapstructure:"vertex_project"`
+	VertexLocation        string        `mapstructure:"vertex_location"`
+	VertexModel           string        `mapstructure:"vertex_model"`
+	VertexTemperature     float32       `mapstructure:"vertex_temperature"`
+	VertexMaxOutputTokens int           `mapstructure:"vertex_max_output_tokens"`
+	VertexTimeout         time.Duration `mapstructure:"vertex_timeout"`
 }
 
 type TradeConfig struct {
@@ -180,11 +185,16 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("signal.forecast_max_age_hours", 24)
 	v.SetDefault("signal.min_sigma", 0.5)
 
-	v.SetDefault("agent.model", "rule-based-agent-v1")
 	v.SetDefault("agent.analyze_limit", 20)
 	v.SetDefault("agent.concurrency", 8)
 	v.SetDefault("agent.market_timeout", "20s")
 	v.SetDefault("agent.max_forecast_days", 10)
+	v.SetDefault("agent.vertex_project", "")
+	v.SetDefault("agent.vertex_location", "us-central1")
+	v.SetDefault("agent.vertex_model", "gemini-2.5-flash")
+	v.SetDefault("agent.vertex_temperature", 0.2)
+	v.SetDefault("agent.vertex_max_output_tokens", 600)
+	v.SetDefault("agent.vertex_timeout", "15s")
 
 	v.SetDefault("trade.private_key", "")
 	v.SetDefault("trade.chain_id", 137)

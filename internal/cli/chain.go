@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os/signal"
 	"strings"
@@ -53,11 +54,24 @@ func newChainScanCmd() *cobra.Command {
 			}
 			defer closeDB()
 
-			result, err := svc.Scan(context.Background(), chain.ScanOptions{
-				LookbackBlocks:       lookback,
-				MaxTx:                maxTx,
-				BotMinTrades:         botMinTrades,
-				BotMaxAvgIntervalSec: botMaxInterval,
+			var result *chain.ScanResult
+			err = runWithRetry(context.Background(), retryOptions{
+				Attempts:       3,
+				InitialBackoff: 500 * time.Millisecond,
+				MaxBackoff:     4 * time.Second,
+				IsRetryable:    isRetryableChainErr,
+				OnRetry: func(attempt int, err error, wait time.Duration) {
+					fmt.Fprintf(cmd.ErrOrStderr(), "chain scan attempt %d failed: %v; retry in %s\n", attempt, err, wait)
+				},
+			}, func(ctx context.Context) error {
+				var runErr error
+				result, runErr = svc.Scan(ctx, chain.ScanOptions{
+					LookbackBlocks:       lookback,
+					MaxTx:                maxTx,
+					BotMinTrades:         botMinTrades,
+					BotMaxAvgIntervalSec: botMaxInterval,
+				})
+				return runErr
 			})
 			if err != nil {
 				return err
@@ -191,7 +205,18 @@ func newChainWatchCmd() *cobra.Command {
 			defer ticker.Stop()
 
 			for {
-				if err := runOneWatchCycle(stopCtx, interval, cmd, svc, lookback, maxTx, limit); err != nil {
+				err := runWithRetry(stopCtx, retryOptions{
+					Attempts:       3,
+					InitialBackoff: 500 * time.Millisecond,
+					MaxBackoff:     4 * time.Second,
+					IsRetryable:    isRetryableChainErr,
+					OnRetry: func(attempt int, err error, wait time.Duration) {
+						fmt.Fprintf(cmd.ErrOrStderr(), "chain watch cycle attempt %d failed: %v; retry in %s\n", attempt, err, wait)
+					},
+				}, func(ctx context.Context) error {
+					return runOneWatchCycle(ctx, interval, cmd, svc, lookback, maxTx, limit)
+				})
+				if err != nil {
 					fmt.Fprintf(cmd.ErrOrStderr(), "chain watch cycle error: %v\n", err)
 				}
 				select {
@@ -251,6 +276,13 @@ func runOneWatchCycle(stopCtx context.Context, interval time.Duration, cmd *cobr
 		return nil
 	}
 	return writeCompetitorsTable(cmd, bots)
+}
+
+func isRetryableChainErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	return errors.Is(err, chain.ErrChainUnavailable) || errors.Is(err, context.DeadlineExceeded)
 }
 
 func writeChainScanResult(cmd *cobra.Command, result *chain.ScanResult) error {

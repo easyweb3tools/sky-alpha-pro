@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os/signal"
 	"syscall"
@@ -48,7 +49,20 @@ func newMarketSyncCmd() *cobra.Command {
 
 			svc := market.NewService(appConfig.Market, db, appLogger)
 			if interval <= 0 {
-				result, err := svc.SyncMarkets(context.Background())
+				var result *market.SyncResult
+				err := runWithRetry(context.Background(), retryOptions{
+					Attempts:       3,
+					InitialBackoff: 500 * time.Millisecond,
+					MaxBackoff:     4 * time.Second,
+					IsRetryable:    isRetryableRuntimeErr,
+					OnRetry: func(attempt int, err error, wait time.Duration) {
+						fmt.Fprintf(cmd.ErrOrStderr(), "market sync attempt %d failed: %v; retry in %s\n", attempt, err, wait)
+					},
+				}, func(ctx context.Context) error {
+					var runErr error
+					result, runErr = svc.SyncMarkets(ctx)
+					return runErr
+				})
 				if err != nil {
 					return err
 				}
@@ -62,7 +76,20 @@ func newMarketSyncCmd() *cobra.Command {
 			defer ticker.Stop()
 
 			for {
-				result, err := svc.SyncMarkets(stopCtx)
+				var result *market.SyncResult
+				err := runWithRetry(stopCtx, retryOptions{
+					Attempts:       3,
+					InitialBackoff: 500 * time.Millisecond,
+					MaxBackoff:     4 * time.Second,
+					IsRetryable:    isRetryableRuntimeErr,
+					OnRetry: func(attempt int, err error, wait time.Duration) {
+						fmt.Fprintf(cmd.ErrOrStderr(), "market sync attempt %d failed: %v; retry in %s\n", attempt, err, wait)
+					},
+				}, func(ctx context.Context) error {
+					var runErr error
+					result, runErr = svc.SyncMarkets(ctx)
+					return runErr
+				})
 				if err != nil {
 					fmt.Fprintf(cmd.ErrOrStderr(), "market sync error: %v\n", err)
 				} else if err := writeMarketSyncResult(cmd, result); err != nil {
@@ -167,4 +194,11 @@ func writeMarketSyncResult(cmd *cobra.Command, result *market.SyncResult) error 
 		}
 	}
 	return nil
+}
+
+func isRetryableRuntimeErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	return !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded)
 }

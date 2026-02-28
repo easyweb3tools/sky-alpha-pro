@@ -284,7 +284,6 @@ func newTestAgentService(db *gorm.DB, weatherSvc *weather.Service) *Service {
 	}, db, zap.NewNop())
 
 	return NewService(config.AgentConfig{
-		Model:           "rule-based-agent-v1",
 		AnalyzeLimit:    20,
 		Concurrency:     4,
 		MarketTimeout:   10 * time.Second,

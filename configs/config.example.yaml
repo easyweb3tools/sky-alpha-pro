@@ -37,11 +37,16 @@ signal:
   min_sigma: 0.5
 
 agent:
-  model: rule-based-agent-v1
   analyze_limit: 20
   concurrency: 8
   market_timeout: 20s
   max_forecast_days: 10
+  vertex_project: ""
+  vertex_location: us-central1
+  vertex_model: gemini-2.5-flash
+  vertex_temperature: 0.2
+  vertex_max_output_tokens: 600
+  vertex_timeout: 15s
 
 trade:
   private_key: ""
