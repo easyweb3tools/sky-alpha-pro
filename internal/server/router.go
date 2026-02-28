@@ -12,6 +12,7 @@ import (
 	"sky-alpha-pro/internal/market"
 	"sky-alpha-pro/internal/player"
 	"sky-alpha-pro/internal/signal"
+	"sky-alpha-pro/internal/sim"
 	"sky-alpha-pro/internal/trade"
 	"sky-alpha-pro/internal/weather"
 	"sky-alpha-pro/pkg/config"
@@ -31,6 +32,7 @@ func NewRouter(cfg *config.Config, log *zap.Logger, db *gorm.DB) http.Handler {
 	tradeSvc := trade.NewService(cfg.Trade, cfg.Market, db, log, signalSvc)
 	chainSvc := chain.NewService(cfg.Chain, db, log)
 	playerSvc := player.NewService(db, log)
+	simSvc := sim.NewService(cfg.Sim, db, log, marketSvc, weatherSvc, signalSvc, tradeSvc)
 
 	api := router.Group("/api/v1")
 	{
@@ -60,6 +62,8 @@ func NewRouter(cfg *config.Config, log *zap.Logger, db *gorm.DB) http.Handler {
 		api.GET("/players/:address/positions", ListPlayerPositionsHandler(playerSvc))
 		api.GET("/players/:address/compare", ComparePlayerHandler(playerSvc))
 		api.GET("/players/:address", GetPlayerHandler(playerSvc))
+		api.GET("/sim/report", SimReportHandler(simSvc))
+		api.POST("/sim/cycle", SimRunCycleHandler(simSvc))
 	}
 
 	return router

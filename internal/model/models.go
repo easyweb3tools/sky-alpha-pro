@@ -114,6 +114,7 @@ type Trade struct {
 	FillPrice  decimal.NullDecimal `gorm:"column:fill_price;type:decimal(10,4)"`
 	FillSize   decimal.NullDecimal `gorm:"column:fill_size;type:decimal(18,6)"`
 	PnLUSDC    decimal.NullDecimal `gorm:"column:pnl_usdc;type:decimal(18,6)"`
+	IsPaper    bool                `gorm:"column:is_paper;default:false;index:idx_trades_paper"`
 	TxHash     string              `gorm:"column:tx_hash;size:66"`
 	ExecutedAt *time.Time          `gorm:"column:executed_at"`
 	CreatedAt  time.Time           `gorm:"column:created_at;not null;index:idx_trades_market,sort:desc,priority:2"`
@@ -126,7 +127,7 @@ type Competitor struct {
 	IsBot               bool                `gorm:"column:is_bot;default:false;index:idx_competitors_bot,priority:1"`
 	BotConfidence       float64             `gorm:"column:bot_confidence;type:decimal(5,2)"`
 	TotalTrades         int                 `gorm:"column:total_trades;default:0"`
-	TotalVolume         decimal.NullDecimal `gorm:"column:total_volume;type:decimal(18,2);default:0"`
+	TotalVolume         decimal.NullDecimal `gorm:"column:total_volume;type:decimal(18,2)"`
 	AvgTradeIntervalSec float64             `gorm:"column:avg_trade_interval_sec;type:decimal(10,2)"`
 	FirstSeenAt         *time.Time          `gorm:"column:first_seen_at"`
 	LastSeenAt          *time.Time          `gorm:"column:last_seen_at;index:idx_competitors_bot,sort:desc,priority:2"`

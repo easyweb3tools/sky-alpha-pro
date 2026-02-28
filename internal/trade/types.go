@@ -9,6 +9,7 @@ type SubmitOrderRequest struct {
 	Price     float64 `json:"price"`
 	Size      float64 `json:"size"`
 	Confirm   bool    `json:"confirm"`
+	SignalID  *uint64 `json:"signal_id,omitempty"`
 }
 
 type SubmitOrderResult struct {
@@ -39,10 +40,12 @@ type ListTradesOptions struct {
 	Limit    int
 	Status   string
 	MarketID string
+	IsPaper  *bool
 }
 
 type ListPositionsOptions struct {
 	MarketID string
+	IsPaper  *bool
 }
 
 type PositionView struct {
@@ -54,12 +57,14 @@ type PositionView struct {
 	MarketValueUSD *float64  `json:"market_value_usd,omitempty"`
 	UnrealizedPnL  *float64  `json:"unrealized_pnl,omitempty"`
 	RealizedPnL    float64   `json:"realized_pnl"`
+	IsPaper        bool      `json:"is_paper"`
 	LatestTradeAt  time.Time `json:"latest_trade_at"`
 }
 
 type PnLReportOptions struct {
-	From time.Time
-	To   time.Time
+	From    time.Time
+	To      time.Time
+	IsPaper *bool
 }
 
 type DailyPnL struct {
@@ -100,6 +105,7 @@ type TradeView struct {
 	FillSize   *float64   `json:"fill_size,omitempty"`
 	PnLUSDC    *float64   `json:"pnl_usdc,omitempty"`
 	TxHash     string     `json:"tx_hash,omitempty"`
+	IsPaper    bool       `json:"is_paper"`
 	ExecutedAt *time.Time `json:"executed_at,omitempty"`
 	CreatedAt  time.Time  `json:"created_at"`
 }

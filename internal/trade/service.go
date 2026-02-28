@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/ethereum/go-ethereum/crypto"
+	"github.com/google/uuid"
 	"github.com/shopspring/decimal"
 	"go.uber.org/zap"
 	"gorm.io/gorm"
@@ -102,6 +103,9 @@ func (s *Service) SubmitOrder(ctx context.Context, req SubmitOrderRequest) (*Sub
 	if err := s.validateRisk(ctx, market, normalized); err != nil {
 		return nil, err
 	}
+	if s.cfg.PaperMode {
+		return s.submitPaperOrder(ctx, market, normalized)
+	}
 	if s.privateKey == nil {
 		return nil, fmt.Errorf("%w: trade private key is not configured", ErrTradeConfig)
 	}
@@ -171,6 +175,48 @@ func (s *Service) SubmitOrder(ctx context.Context, req SubmitOrderRequest) (*Sub
 	return result, nil
 }
 
+func (s *Service) submitPaperOrder(ctx context.Context, market *model.Market, req SubmitOrderRequest) (*SubmitOrderResult, error) {
+	now := time.Now().UTC()
+	price := decimal.NewFromFloat(req.Price)
+	size := decimal.NewFromFloat(req.Size)
+	cost := price.Mul(size)
+	orderID := "paper-" + uuid.New().String()
+
+	row := model.Trade{
+		MarketID:  market.ID,
+		SignalID:  req.SignalID,
+		OrderID:   orderID,
+		Side:      req.Side,
+		Outcome:   req.Outcome,
+		Price:     price,
+		Size:      size,
+		CostUSDC:  cost,
+		Status:    "filled",
+		FillPrice: decimal.NullDecimal{Decimal: price, Valid: true},
+		FillSize:  decimal.NullDecimal{Decimal: size, Valid: true},
+		IsPaper:   true,
+		CreatedAt: now,
+	}
+	if err := s.db.WithContext(ctx).Create(&row).Error; err != nil {
+		return nil, fmt.Errorf("%w: save paper trade failed: %v", ErrTradePersistence, err)
+	}
+
+	fp := price.InexactFloat64()
+	fs := size.InexactFloat64()
+	return &SubmitOrderResult{
+		TradeID:   row.ID,
+		OrderID:   row.OrderID,
+		Status:    row.Status,
+		MarketID:  row.MarketID,
+		Side:      row.Side,
+		Outcome:   row.Outcome,
+		Price:     fp,
+		Size:      fs,
+		CostUSDC:  cost.InexactFloat64(),
+		CreatedAt: row.CreatedAt,
+	}, nil
+}
+
 func (s *Service) CancelOrder(ctx context.Context, tradeID uint64) (*CancelOrderResult, error) {
 	if tradeID == 0 {
 		return nil, fmt.Errorf("%w: trade id is required", ErrTradeInvalidRequest)
@@ -226,6 +272,9 @@ func (s *Service) ListTrades(ctx context.Context, opts ListTradesOptions) ([]Tra
 	query := s.db.WithContext(ctx).Model(&model.Trade{})
 	if marketID := strings.TrimSpace(opts.MarketID); marketID != "" {
 		query = query.Where("market_id = ?", marketID)
+	}
+	if opts.IsPaper != nil {
+		query = query.Where("is_paper = ?", *opts.IsPaper)
 	}
 	if status := strings.TrimSpace(opts.Status); status != "" {
 		normalizedStatus := normalizeTradeStatus(status)
@@ -302,6 +351,9 @@ func (s *Service) ListPositions(ctx context.Context, opts ListPositionsOptions) 
 		Order("market_id ASC, UPPER(outcome) ASC")
 	if marketID := strings.TrimSpace(opts.MarketID); marketID != "" {
 		query = query.Where("market_id = ?", marketID)
+	}
+	if opts.IsPaper != nil {
+		query = query.Where("is_paper = ?", *opts.IsPaper)
 	}
 
 	var rows []positionRow
@@ -453,11 +505,14 @@ func (s *Service) GetPnLReport(ctx context.Context, opts PnLReportOptions) (*PnL
 		PnLUSDC  decimal.NullDecimal `gorm:"column:pnl_usdc"`
 	}
 	var rows []row
-	if err := s.db.WithContext(ctx).
+	pnlQuery := s.db.WithContext(ctx).
 		Table("trades").
 		Select("status, cost_usdc, pnl_usdc").
-		Where("created_at >= ? AND created_at <= ?", from, to).
-		Scan(&rows).Error; err != nil {
+		Where("created_at >= ? AND created_at <= ?", from, to)
+	if opts.IsPaper != nil {
+		pnlQuery = pnlQuery.Where("is_paper = ?", *opts.IsPaper)
+	}
+	if err := pnlQuery.Scan(&rows).Error; err != nil {
 		return nil, err
 	}
 
@@ -508,7 +563,7 @@ func (s *Service) GetPnLReport(ctx context.Context, opts PnLReportOptions) (*PnL
 		FilledCnt   int64               `gorm:"column:filled_trades"`
 	}
 	var dailyRows []dailyRow
-	if err := s.db.WithContext(ctx).
+	dailyQuery := s.db.WithContext(ctx).
 		Table("trades").
 		Select(
 			"DATE(created_at) AS date, "+
@@ -516,7 +571,11 @@ func (s *Service) GetPnLReport(ctx context.Context, opts PnLReportOptions) (*PnL
 				"COALESCE(SUM(cost_usdc), CAST(0 AS NUMERIC)) AS gross_volume, "+
 				"SUM(CASE WHEN status IN ('filled','closed') THEN 1 ELSE 0 END) AS filled_trades",
 		).
-		Where("created_at >= ? AND created_at <= ?", from, to).
+		Where("created_at >= ? AND created_at <= ?", from, to)
+	if opts.IsPaper != nil {
+		dailyQuery = dailyQuery.Where("is_paper = ?", *opts.IsPaper)
+	}
+	if err := dailyQuery.
 		Group("DATE(created_at)").
 		Order("DATE(created_at) ASC").
 		Scan(&dailyRows).Error; err != nil {
@@ -574,9 +633,11 @@ func (s *Service) validateRisk(ctx context.Context, market *model.Market, req Su
 
 	if s.cfg.MaxOpenPositions > 0 {
 		var openCount int64
-		if err := s.db.WithContext(ctx).
+		openQuery := s.db.WithContext(ctx).
 			Model(&model.Trade{}).
 			Where("status IN ?", []string{"pending", "placed", "partially_filled"}).
+			Where("is_paper = ?", s.cfg.PaperMode)
+		if err := openQuery.
 			Distinct("market_id").
 			Count(&openCount).Error; err != nil {
 			return err
@@ -616,6 +677,7 @@ func (s *Service) validateRisk(ctx context.Context, market *model.Market, req Su
 		Where("side = ?", req.Side).
 		Where("outcome = ?", req.Outcome).
 		Where("status IN ?", []string{"pending", "placed", "partially_filled"}).
+		Where("is_paper = ?", s.cfg.PaperMode).
 		Where("created_at >= ?", time.Now().UTC().Add(-5*time.Minute)).
 		Count(&dupCount).Error; err != nil {
 		return err
@@ -724,6 +786,7 @@ func mapTradeView(row model.Trade) TradeView {
 		CostUSDC:   row.CostUSDC.InexactFloat64(),
 		Status:     row.Status,
 		TxHash:     row.TxHash,
+		IsPaper:    row.IsPaper,
 		ExecutedAt: row.ExecutedAt,
 		CreatedAt:  row.CreatedAt,
 	}

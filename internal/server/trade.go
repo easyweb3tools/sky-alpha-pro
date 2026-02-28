@@ -21,6 +21,15 @@ type submitTradeRequest struct {
 	Confirm  bool    `json:"confirm"`
 }
 
+func parseBoolQueryParam(raw string) *bool {
+	raw = strings.TrimSpace(strings.ToLower(raw))
+	if raw == "" {
+		return nil
+	}
+	v := raw == "true" || raw == "1"
+	return &v
+}
+
 func CreateTradeHandler(svc *trade.Service) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		var req submitTradeRequest
@@ -81,10 +90,12 @@ func ListTradesHandler(svc *trade.Service) gin.HandlerFunc {
 		}
 		statusFilter := strings.TrimSpace(c.Query("status"))
 		marketIDFilter := strings.TrimSpace(c.Query("market_id"))
+		isPaper := parseBoolQueryParam(c.Query("is_paper"))
 		items, err := svc.ListTrades(c.Request.Context(), trade.ListTradesOptions{
 			Limit:    limit,
 			Status:   statusFilter,
 			MarketID: marketIDFilter,
+			IsPaper:  isPaper,
 		})
 		if err != nil {
 			if errors.Is(err, trade.ErrTradeInvalidRequest) {
@@ -124,7 +135,11 @@ func GetTradeHandler(svc *trade.Service) gin.HandlerFunc {
 func ListPositionsHandler(svc *trade.Service) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		marketID := strings.TrimSpace(c.Query("market_id"))
-		items, err := svc.ListPositions(c.Request.Context(), trade.ListPositionsOptions{MarketID: marketID})
+		isPaper := parseBoolQueryParam(c.Query("is_paper"))
+		items, err := svc.ListPositions(c.Request.Context(), trade.ListPositionsOptions{
+			MarketID: marketID,
+			IsPaper:  isPaper,
+		})
 		if err != nil {
 			status, code := mapTradeError(err)
 			c.JSON(status, gin.H{"error": gin.H{"code": code, "message": err.Error()}})
@@ -161,8 +176,9 @@ func GetPnLReportHandler(svc *trade.Service) gin.HandlerFunc {
 		}
 
 		report, err := svc.GetPnLReport(c.Request.Context(), trade.PnLReportOptions{
-			From: from,
-			To:   to,
+			From:    from,
+			To:      to,
+			IsPaper: parseBoolQueryParam(c.Query("is_paper")),
 		})
 		if err != nil {
 			status, code := mapTradeError(err)
