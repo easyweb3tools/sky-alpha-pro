@@ -17,6 +17,7 @@ type Config struct {
 	Signal   SignalConfig   `mapstructure:"signal"`
 	Agent    AgentConfig    `mapstructure:"agent"`
 	Trade    TradeConfig    `mapstructure:"trade"`
+	Chain    ChainConfig    `mapstructure:"chain"`
 	Database DatabaseConfig `mapstructure:"database"`
 	Log      LogConfig      `mapstructure:"log"`
 }
@@ -94,6 +95,18 @@ type TradeConfig struct {
 	MaxOpenPositions     int     `mapstructure:"max_open_positions"`
 	MinLiquidity         float64 `mapstructure:"min_liquidity"`
 	ConfirmationRequired bool    `mapstructure:"confirmation_required"`
+}
+
+type ChainConfig struct {
+	RPCURL                 string        `mapstructure:"rpc_url"`
+	ChainID                int64         `mapstructure:"chain_id"`
+	CTFExchangeAddress     string        `mapstructure:"ctf_exchange_address"`
+	NegRiskExchangeAddress string        `mapstructure:"negrisk_exchange_address"`
+	ScanLookbackBlocks     uint64        `mapstructure:"scan_lookback_blocks"`
+	ScanMaxTx              int           `mapstructure:"scan_max_tx"`
+	BotMinTrades           int           `mapstructure:"bot_min_trades"`
+	BotMaxAvgIntervalSec   float64       `mapstructure:"bot_max_avg_interval_sec"`
+	WatchInterval          time.Duration `mapstructure:"watch_interval"`
 }
 
 type LogConfig struct {
@@ -182,6 +195,16 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("trade.max_open_positions", 10)
 	v.SetDefault("trade.min_liquidity", 1000.0)
 	v.SetDefault("trade.confirmation_required", true)
+
+	v.SetDefault("chain.rpc_url", "")
+	v.SetDefault("chain.chain_id", 137)
+	v.SetDefault("chain.ctf_exchange_address", "0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E")
+	v.SetDefault("chain.negrisk_exchange_address", "0xC5d563A36AE78145C45a50134d48A1215220f80a")
+	v.SetDefault("chain.scan_lookback_blocks", 2000)
+	v.SetDefault("chain.scan_max_tx", 2000)
+	v.SetDefault("chain.bot_min_trades", 8)
+	v.SetDefault("chain.bot_max_avg_interval_sec", 8.0)
+	v.SetDefault("chain.watch_interval", "30s")
 
 	v.SetDefault("database.host", "127.0.0.1")
 	v.SetDefault("database.port", 5432)

@@ -65,6 +65,7 @@ func init() {
 	rootCmd.AddCommand(newSignalCmd())
 	rootCmd.AddCommand(newAgentCmd())
 	rootCmd.AddCommand(newTradeCmd())
+	rootCmd.AddCommand(newChainCmd())
 }
 
 func Execute() error {

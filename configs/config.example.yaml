@@ -54,6 +54,17 @@ trade:
   min_liquidity: 1000
   confirmation_required: true
 
+chain:
+  rpc_url: ""
+  chain_id: 137
+  ctf_exchange_address: "0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E"
+  negrisk_exchange_address: "0xC5d563A36AE78145C45a50134d48A1215220f80a"
+  scan_lookback_blocks: 2000
+  scan_max_tx: 2000
+  bot_min_trades: 8
+  bot_max_avg_interval_sec: 8.0
+  watch_interval: 30s
+
 database:
   host: 127.0.0.1
   port: 5432

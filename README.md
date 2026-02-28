@@ -62,6 +62,17 @@ Week 8 delivery:
 - trade CLI: `trade positions`, `trade pnl`
 - trade list API/CLI supports `status` + `market_id` filters
 
+Week 9 delivery:
+
+- Polygon chain scan service for competitor activity bootstrap
+- competitor persistence and bot classification (`competitors`, `competitor_trades`)
+- chain APIs:
+  - `POST /api/v1/chain/scan`
+  - `GET /api/v1/chain/competitors`
+  - `GET /api/v1/chain/competitors/:address`
+  - `GET /api/v1/chain/competitors/:address/trades`
+- chain CLI: `chain scan`, `chain bots`, `chain watch`
+
 ## MVP Database Rule
 
 MVP 阶段数据库表结构统一由 GORM `AutoMigrate` 管理：
@@ -232,6 +243,43 @@ trade:
 
 `private_key` 仅建议通过安全的环境变量/密钥管理系统注入，不要写入版本控制文件。
 当前实现已对齐 CTF Exchange 的 EIP-712 订单结构；若直连真实 CLOB，还需要配置 `POLY_*` 认证头（API key/secret/passphrase）链路。
+
+Chain scan config:
+
+```yaml
+chain:
+  rpc_url: "https://polygon-rpc.com"
+  chain_id: 137
+  ctf_exchange_address: "0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E"
+  negrisk_exchange_address: "0xC5d563A36AE78145C45a50134d48A1215220f80a"
+  scan_lookback_blocks: 2000
+  scan_max_tx: 2000
+  bot_min_trades: 8
+  bot_max_avg_interval_sec: 8.0
+  watch_interval: 30s
+```
+
+## Chain Scan (W9)
+
+CLI:
+
+```bash
+go run ./cmd/sky-alpha-pro chain scan --lookback-blocks 2000
+go run ./cmd/sky-alpha-pro chain bots --limit 20
+go run ./cmd/sky-alpha-pro chain bots --address 0xabc... --trades --trades-limit 30
+go run ./cmd/sky-alpha-pro chain watch --interval 30s
+```
+
+REST API:
+
+```bash
+curl -X POST http://127.0.0.1:8080/api/v1/chain/scan \
+  -H "Content-Type: application/json" \
+  -d '{"lookback_blocks":2000,"max_tx":2000}'
+curl "http://127.0.0.1:8080/api/v1/chain/competitors?only_bots=true&limit=20"
+curl "http://127.0.0.1:8080/api/v1/chain/competitors/0xabc..."
+curl "http://127.0.0.1:8080/api/v1/chain/competitors/0xabc.../trades?limit=50"
+```
 
 ## Container
 
