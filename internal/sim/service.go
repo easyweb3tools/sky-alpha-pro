@@ -50,20 +50,26 @@ func NewService(
 }
 
 func (s *Service) RunCycle(ctx context.Context, cycleNum int) (*CycleResult, error) {
+	return s.RunCycleWithOptions(ctx, cycleNum, RunCycleOptions{})
+}
+
+func (s *Service) RunCycleWithOptions(ctx context.Context, cycleNum int, opts RunCycleOptions) (*CycleResult, error) {
 	result := &CycleResult{
 		Cycle:  cycleNum,
 		Errors: make([]string, 0),
 	}
 
 	// 1. Sync markets and prices
-	syncRes, err := s.marketSvc.SyncMarkets(ctx)
-	if err != nil {
-		result.Errors = append(result.Errors, fmt.Sprintf("market sync: %v", err))
-		s.log.Warn("sim cycle market sync failed", zap.Int("cycle", cycleNum), zap.Error(err))
-	} else {
-		result.MarketsSynced = syncRes.MarketsUpserted
-		for _, e := range syncRes.Errors {
-			result.Errors = append(result.Errors, "market: "+e)
+	if !opts.SkipMarketSync {
+		syncRes, err := s.marketSvc.SyncMarkets(ctx)
+		if err != nil {
+			result.Errors = append(result.Errors, fmt.Sprintf("market sync: %v", err))
+			s.log.Warn("sim cycle market sync failed", zap.Int("cycle", cycleNum), zap.Error(err))
+		} else {
+			result.MarketsSynced = syncRes.MarketsUpserted
+			for _, e := range syncRes.Errors {
+				result.Errors = append(result.Errors, "market: "+e)
+			}
 		}
 	}
 

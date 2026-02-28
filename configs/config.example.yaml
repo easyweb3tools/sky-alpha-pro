@@ -70,6 +70,44 @@ chain:
   bot_max_avg_interval_sec: 8.0
   watch_interval: 30s
 
+scheduler:
+  enabled: true
+  run_on_start: true
+  lock_mode: local
+  lock_key_prefix: 7300
+  default_timeout: 60s
+  default_jitter_ratio: 0.1
+  jobs:
+    market_sync:
+      enabled: true
+      interval: 5m
+      timeout: 90s
+      immediate: true
+    weather_forecast:
+      enabled: true
+      interval: 15m
+      timeout: 120s
+      immediate: true
+      city_concurrency: 6
+      days: 7
+      source: all
+    chain_scan:
+      enabled: true
+      interval: 2m
+      timeout: 90s
+      immediate: true
+      lookback_blocks: 0
+      max_tx: 0
+    sim_cycle:
+      enabled: false
+      interval: 5m
+      timeout: 120s
+      immediate: false
+
+metrics:
+  enabled: true
+  path: /metrics
+
 database:
   host: 127.0.0.1
   port: 5432
