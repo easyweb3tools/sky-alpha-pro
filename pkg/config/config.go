@@ -76,8 +76,11 @@ type SignalConfig struct {
 }
 
 type AgentConfig struct {
-	Model        string `mapstructure:"model"`
-	AnalyzeLimit int    `mapstructure:"analyze_limit"`
+	Model           string        `mapstructure:"model"`
+	AnalyzeLimit    int           `mapstructure:"analyze_limit"`
+	Concurrency     int           `mapstructure:"concurrency"`
+	MarketTimeout   time.Duration `mapstructure:"market_timeout"`
+	MaxForecastDays int           `mapstructure:"max_forecast_days"`
 }
 
 type LogConfig struct {
@@ -153,6 +156,9 @@ func setDefaults(v *viper.Viper) {
 
 	v.SetDefault("agent.model", "rule-based-agent-v1")
 	v.SetDefault("agent.analyze_limit", 20)
+	v.SetDefault("agent.concurrency", 8)
+	v.SetDefault("agent.market_timeout", "20s")
+	v.SetDefault("agent.max_forecast_days", 10)
 
 	v.SetDefault("database.host", "127.0.0.1")
 	v.SetDefault("database.port", 5432)

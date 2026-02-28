@@ -36,7 +36,7 @@ func NewRouter(cfg *config.Config, log *zap.Logger, db *gorm.DB) http.Handler {
 		api.GET("/signals", ListSignalsHandler(signalSvc))
 		api.POST("/signals/generate", GenerateSignalsHandler(signalSvc))
 		api.POST("/agent/analyze", AnalyzeAgentHandler(agentSvc))
-		api.GET("/agent/signals", ListAgentSignalsHandler(signalSvc))
+		api.GET("/agent/signals", ListSignalsHandler(signalSvc))
 		api.GET("/agent/signals/:id", GetAgentSignalHandler(signalSvc))
 	}
 

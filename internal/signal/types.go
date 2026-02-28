@@ -30,3 +30,9 @@ type ListOptions struct {
 	Limit   int
 	MinEdge float64
 }
+
+type ForecastSnapshot struct {
+	Source    string    `json:"source"`
+	Value     float64   `json:"value"`
+	FetchedAt time.Time `json:"fetched_at"`
+}

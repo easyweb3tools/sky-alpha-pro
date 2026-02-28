@@ -192,12 +192,14 @@ type WeatherStation struct {
 }
 
 type AgentLog struct {
-	ID               uint64         `gorm:"column:id;primaryKey;autoIncrement"`
-	SessionID        string         `gorm:"column:session_id;size:100;index:idx_agent_logs_session,priority:1"`
-	MarketID         string         `gorm:"column:market_id;type:uuid;index:idx_agent_logs_market,priority:1"`
-	Action           string         `gorm:"column:action;size:50;not null"`
-	Model            string         `gorm:"column:model;size:50"`
-	PromptTokens     int            `gorm:"column:prompt_tokens"`
+	ID        uint64 `gorm:"column:id;primaryKey;autoIncrement"`
+	SessionID string `gorm:"column:session_id;size:100;index:idx_agent_logs_session,priority:1"`
+	MarketID  string `gorm:"column:market_id;type:uuid;index:idx_agent_logs_market,priority:1"`
+	Action    string `gorm:"column:action;size:50;not null"`
+	Model     string `gorm:"column:model;size:50"`
+	// Rule-based agent mode does not consume LLM tokens; kept for future Gemini integration.
+	PromptTokens int `gorm:"column:prompt_tokens"`
+	// Rule-based agent mode does not consume LLM tokens; kept for future Gemini integration.
 	CompletionTokens int            `gorm:"column:completion_tokens"`
 	ToolCalls        datatypes.JSON `gorm:"column:tool_calls;type:jsonb"`
 	Reasoning        string         `gorm:"column:reasoning;type:text"`

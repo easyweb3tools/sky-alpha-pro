@@ -2,16 +2,17 @@ package agent
 
 import (
 	"context"
-	"database/sql"
 	"encoding/json"
 	"fmt"
 	"math"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
 	"go.uber.org/zap"
+	"golang.org/x/sync/errgroup"
 	"gorm.io/datatypes"
 	"gorm.io/gorm"
 
@@ -21,18 +22,19 @@ import (
 	"sky-alpha-pro/pkg/config"
 )
 
+const (
+	defaultAnalyzeConcurrency = 8
+	defaultMarketTimeout      = 20 * time.Second
+	defaultForecastDaysCap    = 10
+	defaultStaleHoursLimit    = 24.0
+)
+
 type Service struct {
 	cfg       config.AgentConfig
 	db        *gorm.DB
 	log       *zap.Logger
 	weather   *weather.Service
 	signalSvc *signal.Service
-}
-
-type forecastSnapshot struct {
-	Source    string
-	Value     float64
-	FetchedAt time.Time
 }
 
 func NewService(cfg config.AgentConfig, db *gorm.DB, log *zap.Logger, weatherSvc *weather.Service, signalSvc *signal.Service) *Service {
@@ -46,6 +48,11 @@ func NewService(cfg config.AgentConfig, db *gorm.DB, log *zap.Logger, weatherSvc
 }
 
 func (s *Service) Analyze(ctx context.Context, req AnalyzeRequest) (*AnalyzeResponse, error) {
+	depth, err := ValidateDepth(req.Depth)
+	if err != nil {
+		return nil, err
+	}
+
 	markets, err := s.selectMarkets(ctx, req)
 	if err != nil {
 		return nil, err
@@ -56,16 +63,58 @@ func (s *Service) Analyze(ctx context.Context, req AnalyzeRequest) (*AnalyzeResp
 		GeneratedAt: time.Now().UTC(),
 		Items:       make([]AnalyzeItem, 0, len(markets)),
 		Errors:      make([]string, 0),
-		Count:       len(markets),
+		Count:       0,
+	}
+	if len(markets) == 0 {
+		return resp, nil
 	}
 
-	for _, market := range markets {
-		item, analyzeErr := s.analyzeMarket(ctx, resp.SessionID, market, req.Depth)
-		if analyzeErr != nil {
-			resp.Errors = append(resp.Errors, fmt.Sprintf("%s: %v", market.PolymarketID, analyzeErr))
-			continue
-		}
-		resp.Items = append(resp.Items, *item)
+	workers := s.cfg.Concurrency
+	if workers <= 0 {
+		workers = defaultAnalyzeConcurrency
+	}
+	marketTimeout := s.cfg.MarketTimeout
+	if marketTimeout <= 0 {
+		marketTimeout = defaultMarketTimeout
+	}
+
+	type indexedItem struct {
+		Index int
+		Item  AnalyzeItem
+	}
+
+	var (
+		mu        sync.Mutex
+		collected []indexedItem
+	)
+	g, gctx := errgroup.WithContext(ctx)
+	g.SetLimit(workers)
+
+	for idx, market := range markets {
+		i := idx
+		m := market
+		g.Go(func() error {
+			marketCtx, cancel := context.WithTimeout(gctx, marketTimeout)
+			defer cancel()
+
+			item, analyzeErr := s.analyzeMarket(marketCtx, resp.SessionID, m, depth)
+			mu.Lock()
+			defer mu.Unlock()
+			if analyzeErr != nil {
+				resp.Errors = append(resp.Errors, fmt.Sprintf("%s: %v", m.PolymarketID, analyzeErr))
+				return nil
+			}
+			collected = append(collected, indexedItem{Index: i, Item: *item})
+			return nil
+		})
+	}
+	if err := g.Wait(); err != nil {
+		return nil, err
+	}
+
+	sort.Slice(collected, func(i, j int) bool { return collected[i].Index < collected[j].Index })
+	for _, item := range collected {
+		resp.Items = append(resp.Items, item.Item)
 	}
 	resp.Count = len(resp.Items)
 	return resp, nil
@@ -75,19 +124,25 @@ func (s *Service) analyzeMarket(ctx context.Context, sessionID string, m model.M
 	start := time.Now()
 	toolCalls := make([]ToolCall, 0, 4)
 	riskFactors := make([]string, 0)
+	status := "ok"
 
 	targetDate := m.EndDate.UTC().AddDate(0, 0, -1)
 	targetDate = time.Date(targetDate.Year(), targetDate.Month(), targetDate.Day(), 0, 0, 0, 0, time.UTC)
 
-	city := normalizeCity(m.City)
-	if city == "" {
-		city = inferCityFromQuestion(m.Question)
+	toolStart := time.Now()
+	city, cityErr := s.signalSvc.ResolveMarketCity(ctx, m)
+	toolCalls = append(toolCalls, newToolCall("resolve_city", map[string]any{
+		"market_id": m.ID,
+	}, toolStart, cityErr))
+	if cityErr != nil {
+		return nil, cityErr
 	}
 	if city == "" {
-		riskFactors = append(riskFactors, "market city is missing")
+		status = "degraded"
+		riskFactors = append(riskFactors, "market city unresolved")
 	}
 
-	toolStart := time.Now()
+	toolStart = time.Now()
 	priceYes, loadPriceErr := s.loadLatestMarketPrice(ctx, m.ID)
 	toolCalls = append(toolCalls, newToolCall("get_market_prices", map[string]any{
 		"market_id": m.ID,
@@ -97,7 +152,7 @@ func (s *Service) analyzeMarket(ctx context.Context, sessionID string, m model.M
 	}
 
 	toolStart = time.Now()
-	forecastValues, forecastErr := s.loadForecastBySource(ctx, city, targetDate, m.MarketType)
+	forecastValues, forecastErr := s.signalSvc.LoadForecastSnapshots(ctx, city, targetDate, m.MarketType)
 	toolCalls = append(toolCalls, newToolCall("get_weather_forecast", map[string]any{
 		"location": city,
 		"date":     targetDate.Format("2006-01-02"),
@@ -106,7 +161,7 @@ func (s *Service) analyzeMarket(ctx context.Context, sessionID string, m model.M
 
 	if forecastErr != nil && city != "" && s.weather != nil {
 		toolStart = time.Now()
-		days := daysUntil(targetDate)
+		days := daysUntil(targetDate, s.cfg.MaxForecastDays)
 		_, refreshErr := s.weather.GetForecast(ctx, weather.ForecastRequest{
 			Location: city,
 			Source:   "all",
@@ -119,11 +174,12 @@ func (s *Service) analyzeMarket(ctx context.Context, sessionID string, m model.M
 			"refresh":  true,
 		}, toolStart, refreshErr))
 		if refreshErr != nil {
+			status = "degraded"
 			riskFactors = append(riskFactors, "weather refresh failed: "+refreshErr.Error())
 		}
 
 		toolStart = time.Now()
-		forecastValues, forecastErr = s.loadForecastBySource(ctx, city, targetDate, m.MarketType)
+		forecastValues, forecastErr = s.signalSvc.LoadForecastSnapshots(ctx, city, targetDate, m.MarketType)
 		toolCalls = append(toolCalls, newToolCall("get_weather_forecast", map[string]any{
 			"location": city,
 			"date":     targetDate.Format("2006-01-02"),
@@ -134,12 +190,14 @@ func (s *Service) analyzeMarket(ctx context.Context, sessionID string, m model.M
 	forecastSummary := "no forecast snapshot available"
 	if len(forecastValues) > 0 {
 		forecastSummary = summarizeForecasts(forecastValues)
-		oldestAge := oldestForecastAgeHours(forecastValues)
-		if oldestAge > 24 {
+		oldestAge := oldestForecastAgeHours(time.Now().UTC(), forecastValues)
+		if oldestAge > defaultStaleHoursLimit {
+			status = "degraded"
 			riskFactors = append(riskFactors, fmt.Sprintf("forecast data stale: oldest %.0fh", oldestAge))
 		}
 	}
 	if forecastErr != nil {
+		status = "degraded"
 		riskFactors = append(riskFactors, "forecast unavailable")
 	}
 
@@ -162,6 +220,7 @@ func (s *Service) analyzeMarket(ctx context.Context, sessionID string, m model.M
 		confidence = generatedSignal.Confidence
 		reasoning = generatedSignal.Reasoning
 	} else {
+		status = "degraded"
 		latestSignal, latestErr := s.loadLatestSignalForMarket(ctx, m.ID)
 		if latestErr == nil && latestSignal != nil {
 			ourProbability = latestSignal.OurEstimate
@@ -169,14 +228,21 @@ func (s *Service) analyzeMarket(ctx context.Context, sessionID string, m model.M
 			confidence = latestSignal.Confidence
 			reasoning = latestSignal.Reasoning
 			riskFactors = append(riskFactors, "using latest historical signal due to generation failure")
+		} else {
+			confidence = 5
+			reasoning = "degraded analysis: signal generation failed and no prior signal available"
 		}
 		if signalErr != nil {
 			riskFactors = append(riskFactors, "signal generation failed: "+signalErr.Error())
 		}
 	}
 
+	if status == "degraded" && confidence > 25 {
+		confidence = 25
+	}
+
 	recommendation := buildRecommendation(edgePct, priceYes)
-	if depth == "full" && len(forecastValues) > 0 {
+	if depth == DepthFull && len(forecastValues) > 0 {
 		reasoning = reasoning + "; forecasts: " + forecastSummary
 	}
 
@@ -186,6 +252,7 @@ func (s *Service) analyzeMarket(ctx context.Context, sessionID string, m model.M
 		Question:     m.Question,
 		ToolCalls:    toolCalls,
 		Analysis: AnalysisBlock{
+			Status:          status,
 			ForecastSummary: forecastSummary,
 			MarketPriceYes:  priceYes,
 			OurProbability:  ourProbability,
@@ -205,7 +272,7 @@ func (s *Service) analyzeMarket(ctx context.Context, sessionID string, m model.M
 
 func (s *Service) selectMarkets(ctx context.Context, req AnalyzeRequest) ([]model.Market, error) {
 	if strings.TrimSpace(req.MarketID) != "" && !req.All {
-		m, err := s.loadMarket(ctx, req.MarketID)
+		m, err := s.signalSvc.LoadMarketByRef(ctx, req.MarketID)
 		if err != nil {
 			return nil, err
 		}
@@ -236,21 +303,6 @@ func (s *Service) selectMarkets(ctx context.Context, req AnalyzeRequest) ([]mode
 	return markets, nil
 }
 
-func (s *Service) loadMarket(ctx context.Context, marketRef string) (*model.Market, error) {
-	ref := strings.TrimSpace(marketRef)
-	if ref == "" {
-		return nil, fmt.Errorf("market id is required")
-	}
-	var m model.Market
-	err := s.db.WithContext(ctx).
-		Where("id = ? OR polymarket_id = ?", ref, ref).
-		Take(&m).Error
-	if err != nil {
-		return nil, err
-	}
-	return &m, nil
-}
-
 func (s *Service) loadLatestMarketPrice(ctx context.Context, marketID string) (float64, error) {
 	var row model.MarketPrice
 	if err := s.db.WithContext(ctx).
@@ -260,63 +312,6 @@ func (s *Service) loadLatestMarketPrice(ctx context.Context, marketID string) (f
 		return 0, err
 	}
 	return row.PriceYes.InexactFloat64(), nil
-}
-
-func (s *Service) loadForecastBySource(ctx context.Context, city string, targetDate time.Time, marketType string) ([]forecastSnapshot, error) {
-	if city == "" {
-		return nil, fmt.Errorf("city missing")
-	}
-
-	type row struct {
-		Source    string          `gorm:"column:source"`
-		TempHighF sql.NullFloat64 `gorm:"column:temp_high_f"`
-		TempLowF  sql.NullFloat64 `gorm:"column:temp_low_f"`
-		FetchedAt time.Time       `gorm:"column:fetched_at"`
-	}
-	var rows []row
-	if err := s.db.WithContext(ctx).
-		Table("forecasts").
-		Select("source, temp_high_f, temp_low_f, fetched_at").
-		Where("city = ?", city).
-		Where("DATE(forecast_date) = ?", targetDate.Format("2006-01-02")).
-		Order("source ASC").
-		Order("fetched_at DESC").
-		Scan(&rows).Error; err != nil {
-		return nil, err
-	}
-	if len(rows) == 0 {
-		return nil, fmt.Errorf("no forecast found")
-	}
-
-	out := make([]forecastSnapshot, 0, 3)
-	seen := make(map[string]struct{}, 3)
-	for _, r := range rows {
-		if _, ok := seen[r.Source]; ok {
-			continue
-		}
-		val := sql.NullFloat64{}
-		if marketType == "temperature_low" {
-			val = r.TempLowF
-		} else {
-			val = r.TempHighF
-		}
-		if !val.Valid {
-			continue
-		}
-		out = append(out, forecastSnapshot{
-			Source:    r.Source,
-			Value:     val.Float64,
-			FetchedAt: r.FetchedAt,
-		})
-		seen[r.Source] = struct{}{}
-	}
-	if len(out) == 0 {
-		return nil, fmt.Errorf("no usable forecast values")
-	}
-	sort.Slice(out, func(i, j int) bool {
-		return out[i].Source < out[j].Source
-	})
-	return out, nil
 }
 
 func (s *Service) loadLatestSignalForMarket(ctx context.Context, marketID string) (*signal.SignalView, error) {
@@ -369,6 +364,17 @@ func (s *Service) persistAgentLog(ctx context.Context, sessionID string, marketI
 	return s.db.WithContext(ctx).Create(&row).Error
 }
 
+func ValidateDepth(raw string) (string, error) {
+	depth := strings.ToLower(strings.TrimSpace(raw))
+	if depth == "" {
+		return DepthSummary, nil
+	}
+	if depth != DepthSummary && depth != DepthFull {
+		return "", fmt.Errorf("invalid depth: %s (allowed: summary|full)", raw)
+	}
+	return depth, nil
+}
+
 func newToolCall(name string, args map[string]any, start time.Time, callErr error) ToolCall {
 	tc := ToolCall{
 		Name:       name,
@@ -383,7 +389,7 @@ func newToolCall(name string, args map[string]any, start time.Time, callErr erro
 	return tc
 }
 
-func summarizeForecasts(items []forecastSnapshot) string {
+func summarizeForecasts(items []signal.ForecastSnapshot) string {
 	if len(items) == 0 {
 		return ""
 	}
@@ -394,7 +400,7 @@ func summarizeForecasts(items []forecastSnapshot) string {
 	return strings.Join(parts, ", ")
 }
 
-func oldestForecastAgeHours(items []forecastSnapshot) float64 {
+func oldestForecastAgeHours(now time.Time, items []signal.ForecastSnapshot) float64 {
 	if len(items) == 0 {
 		return 0
 	}
@@ -404,7 +410,7 @@ func oldestForecastAgeHours(items []forecastSnapshot) float64 {
 			oldest = item.FetchedAt
 		}
 	}
-	return math.Max(0, time.Since(oldest).Hours())
+	return math.Max(0, now.Sub(oldest).Hours())
 }
 
 func buildRecommendation(edgePct float64, marketPrice float64) string {
@@ -417,42 +423,16 @@ func buildRecommendation(edgePct float64, marketPrice float64) string {
 	return fmt.Sprintf("BUY NO at %.4f or better", 1-marketPrice)
 }
 
-func daysUntil(targetDate time.Time) int {
+func daysUntil(targetDate time.Time, maxDays int) int {
+	if maxDays <= 0 {
+		maxDays = defaultForecastDaysCap
+	}
 	days := int(targetDate.Sub(time.Now().UTC()).Hours()/24) + 1
 	if days < 1 {
 		return 1
 	}
-	if days > 10 {
-		return 10
+	if days > maxDays {
+		return maxDays
 	}
 	return days
-}
-
-func normalizeCity(v string) string {
-	v = strings.ToLower(strings.TrimSpace(v))
-	if v == "" {
-		return ""
-	}
-	return strings.Join(strings.Fields(v), " ")
-}
-
-func inferCityFromQuestion(question string) string {
-	q := strings.ToLower(strings.TrimSpace(question))
-	if q == "" {
-		return ""
-	}
-	known := []string{
-		"new york",
-		"chicago",
-		"miami",
-		"los angeles",
-		"austin",
-		"dallas",
-	}
-	for _, city := range known {
-		if strings.Contains(q, city) {
-			return city
-		}
-	}
-	return ""
 }

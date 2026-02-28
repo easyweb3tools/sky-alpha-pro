@@ -4,12 +4,15 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/gin-gonic/gin"
 
 	"sky-alpha-pro/internal/agent"
 	"sky-alpha-pro/internal/signal"
 )
+
+var agentAnalyzeMu sync.Mutex
 
 type analyzeAgentRequest struct {
 	MarketID string `json:"market_id"`
@@ -20,6 +23,14 @@ type analyzeAgentRequest struct {
 
 func AnalyzeAgentHandler(svc *agent.Service) gin.HandlerFunc {
 	return func(c *gin.Context) {
+		if !agentAnalyzeMu.TryLock() {
+			c.JSON(http.StatusConflict, gin.H{
+				"error": gin.H{"code": "AGENT_ANALYZE_RUNNING", "message": "agent analyze already running"},
+			})
+			return
+		}
+		defer agentAnalyzeMu.Unlock()
+
 		var body analyzeAgentRequest
 		if c.Request.ContentLength > 0 {
 			if err := c.ShouldBindJSON(&body); err != nil {
@@ -56,6 +67,12 @@ func AnalyzeAgentHandler(svc *agent.Service) gin.HandlerFunc {
 			}
 			body.Limit = v
 		}
+		if _, err := agent.ValidateDepth(body.Depth); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{
+				"error": gin.H{"code": "BAD_REQUEST", "message": err.Error()},
+			})
+			return
+		}
 
 		resp, err := svc.Analyze(c.Request.Context(), agent.AnalyzeRequest{
 			MarketID: body.MarketID,
@@ -64,52 +81,12 @@ func AnalyzeAgentHandler(svc *agent.Service) gin.HandlerFunc {
 			Depth:    body.Depth,
 		})
 		if err != nil {
-			c.JSON(http.StatusBadGateway, gin.H{
+			c.JSON(http.StatusInternalServerError, gin.H{
 				"error": gin.H{"code": "AGENT_ANALYZE_FAILED", "message": err.Error()},
 			})
 			return
 		}
 		c.JSON(http.StatusOK, resp)
-	}
-}
-
-func ListAgentSignalsHandler(svc *signal.Service) gin.HandlerFunc {
-	return func(c *gin.Context) {
-		limit := 20
-		if raw := c.Query("limit"); raw != "" {
-			n, err := strconv.Atoi(raw)
-			if err != nil || n <= 0 {
-				c.JSON(http.StatusBadRequest, gin.H{
-					"error": gin.H{"code": "BAD_REQUEST", "message": "invalid limit query parameter"},
-				})
-				return
-			}
-			limit = n
-		}
-
-		minEdge := 0.0
-		if raw := c.Query("min_edge"); raw != "" {
-			v, err := strconv.ParseFloat(raw, 64)
-			if err != nil || v < 0 {
-				c.JSON(http.StatusBadRequest, gin.H{
-					"error": gin.H{"code": "BAD_REQUEST", "message": "invalid min_edge query parameter"},
-				})
-				return
-			}
-			minEdge = v
-		}
-
-		items, err := svc.ListSignals(c.Request.Context(), signal.ListOptions{
-			Limit:   limit,
-			MinEdge: minEdge,
-		})
-		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{
-				"error": gin.H{"code": "INTERNAL_ERROR", "message": err.Error()},
-			})
-			return
-		}
-		c.JSON(http.StatusOK, gin.H{"items": items, "count": len(items)})
 	}
 }
 

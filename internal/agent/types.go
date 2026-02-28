@@ -26,6 +26,7 @@ type AnalyzeItem struct {
 }
 
 type AnalysisBlock struct {
+	Status          string   `json:"status"`
 	ForecastSummary string   `json:"forecast_summary"`
 	MarketPriceYes  float64  `json:"market_price_yes"`
 	OurProbability  float64  `json:"our_probability"`
@@ -43,3 +44,8 @@ type ToolCall struct {
 	DurationMS int64          `json:"duration_ms"`
 	Error      string         `json:"error,omitempty"`
 }
+
+const (
+	DepthSummary = "summary"
+	DepthFull    = "full"
+)

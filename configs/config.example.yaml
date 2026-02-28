@@ -39,6 +39,9 @@ signal:
 agent:
   model: rule-based-agent-v1
   analyze_limit: 20
+  concurrency: 8
+  market_timeout: 20s
+  max_forecast_days: 10
 
 database:
   host: 127.0.0.1

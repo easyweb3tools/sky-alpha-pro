@@ -29,10 +29,7 @@ type Service struct {
 	log *zap.Logger
 }
 
-type forecastSourceValue struct {
-	Source string
-	Value  float64
-}
+type forecastSourceValue = ForecastSnapshot
 
 func NewService(cfg config.SignalConfig, db *gorm.DB, log *zap.Logger) *Service {
 	return &Service{cfg: cfg, db: db, log: log}
@@ -142,7 +139,7 @@ func (s *Service) ListSignals(ctx context.Context, opts ListOptions) ([]SignalVi
 }
 
 func (s *Service) GenerateSignalForMarketID(ctx context.Context, marketRef string) (*SignalView, error) {
-	market, err := s.loadMarket(ctx, marketRef)
+	market, err := s.LoadMarketByRef(ctx, marketRef)
 	if err != nil {
 		return nil, err
 	}
@@ -169,6 +166,22 @@ func (s *Service) GenerateSignalForMarketID(ctx context.Context, marketRef strin
 	}
 	view := mapSignalView(row)
 	return &view, nil
+}
+
+func (s *Service) LoadMarketByRef(ctx context.Context, marketRef string) (*model.Market, error) {
+	return s.loadMarket(ctx, marketRef)
+}
+
+func (s *Service) ResolveMarketCity(ctx context.Context, market model.Market) (string, error) {
+	knownCities, err := s.loadKnownCities(ctx)
+	if err != nil {
+		return "", err
+	}
+	return inferCity(market, knownCities), nil
+}
+
+func (s *Service) LoadForecastSnapshots(ctx context.Context, city string, targetDate time.Time, marketType string) ([]ForecastSnapshot, error) {
+	return s.loadForecastValues(ctx, city, targetDate, marketType)
 }
 
 func (s *Service) GetSignalByID(ctx context.Context, id uint64) (*SignalView, error) {
@@ -348,8 +361,9 @@ func (s *Service) loadForecastValues(ctx context.Context, city string, targetDat
 		}
 
 		values = append(values, forecastSourceValue{
-			Source: r.Source,
-			Value:  picked.Float64,
+			Source:    r.Source,
+			Value:     picked.Float64,
+			FetchedAt: r.FetchedAt,
 		})
 		seenSource[r.Source] = struct{}{}
 	}
