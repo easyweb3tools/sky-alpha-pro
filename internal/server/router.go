@@ -10,6 +10,7 @@ import (
 	"sky-alpha-pro/internal/agent"
 	"sky-alpha-pro/internal/chain"
 	"sky-alpha-pro/internal/market"
+	"sky-alpha-pro/internal/player"
 	"sky-alpha-pro/internal/signal"
 	"sky-alpha-pro/internal/trade"
 	"sky-alpha-pro/internal/weather"
@@ -29,6 +30,7 @@ func NewRouter(cfg *config.Config, log *zap.Logger, db *gorm.DB) http.Handler {
 	agentSvc := agent.NewService(cfg.Agent, db, log, weatherSvc, signalSvc)
 	tradeSvc := trade.NewService(cfg.Trade, cfg.Market, db, log, signalSvc)
 	chainSvc := chain.NewService(cfg.Chain, db, log)
+	playerSvc := player.NewService(db, log)
 
 	api := router.Group("/api/v1")
 	{
@@ -52,6 +54,12 @@ func NewRouter(cfg *config.Config, log *zap.Logger, db *gorm.DB) http.Handler {
 		api.GET("/chain/competitors", ListCompetitorsHandler(chainSvc))
 		api.GET("/chain/competitors/:address", GetCompetitorHandler(chainSvc))
 		api.GET("/chain/competitors/:address/trades", ListCompetitorTradesHandler(chainSvc))
+		api.POST("/players/sync", SyncPlayersHandler(playerSvc))
+		api.GET("/players", ListPlayersHandler(playerSvc))
+		api.GET("/players/leaderboard", GetPlayerLeaderboardHandler(playerSvc))
+		api.GET("/players/:address/positions", ListPlayerPositionsHandler(playerSvc))
+		api.GET("/players/:address/compare", ComparePlayerHandler(playerSvc))
+		api.GET("/players/:address", GetPlayerHandler(playerSvc))
 	}
 
 	return router

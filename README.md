@@ -73,6 +73,19 @@ Week 9 delivery:
   - `GET /api/v1/chain/competitors/:address/trades`
 - chain CLI: `chain scan`, `chain bots`, `chain watch`
 
+Week 10 delivery:
+
+- player tracking service based on tracked on-chain activity
+- player ranking and position snapshots persisted into `players`, `player_positions`
+- player APIs:
+  - `POST /api/v1/players/sync`
+  - `GET /api/v1/players`
+  - `GET /api/v1/players/leaderboard`
+  - `GET /api/v1/players/:address`
+  - `GET /api/v1/players/:address/positions`
+  - `GET /api/v1/players/:address/compare`
+- player CLI: `player sync`, `player list`, `player show`, `player leaderboard`, `player compare`
+
 ## MVP Database Rule
 
 MVP 阶段数据库表结构统一由 GORM `AutoMigrate` 管理：
@@ -279,6 +292,29 @@ curl -X POST http://127.0.0.1:8080/api/v1/chain/scan \
 curl "http://127.0.0.1:8080/api/v1/chain/competitors?only_bots=true&limit=20"
 curl "http://127.0.0.1:8080/api/v1/chain/competitors/0xabc..."
 curl "http://127.0.0.1:8080/api/v1/chain/competitors/0xabc.../trades?limit=50"
+```
+
+## Player Tracking (W10)
+
+CLI:
+
+```bash
+go run ./cmd/sky-alpha-pro player sync --limit 50
+go run ./cmd/sky-alpha-pro player list --limit 20
+go run ./cmd/sky-alpha-pro player show 0xabc... --positions-limit 20
+go run ./cmd/sky-alpha-pro player leaderboard --type weather --limit 20
+go run ./cmd/sky-alpha-pro player compare 0xabc...
+```
+
+REST API:
+
+```bash
+curl -X POST "http://127.0.0.1:8080/api/v1/players/sync?limit=50"
+curl "http://127.0.0.1:8080/api/v1/players?limit=20"
+curl "http://127.0.0.1:8080/api/v1/players/leaderboard?type=weather&limit=20"
+curl "http://127.0.0.1:8080/api/v1/players/0xabc..."
+curl "http://127.0.0.1:8080/api/v1/players/0xabc.../positions?limit=20"
+curl "http://127.0.0.1:8080/api/v1/players/0xabc.../compare"
 ```
 
 ## Container

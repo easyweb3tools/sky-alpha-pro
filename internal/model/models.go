@@ -166,9 +166,9 @@ type Player struct {
 
 type PlayerPosition struct {
 	ID           uint64              `gorm:"column:id;primaryKey;autoIncrement"`
-	PlayerID     uint64              `gorm:"column:player_id;not null;index:idx_player_positions_player"`
-	MarketID     string              `gorm:"column:market_id;type:uuid;not null;index:idx_player_positions_market"`
-	Outcome      string              `gorm:"column:outcome;size:10;not null"`
+	PlayerID     uint64              `gorm:"column:player_id;not null;index:idx_player_positions_player;uniqueIndex:idx_player_positions_unique,priority:1"`
+	MarketID     string              `gorm:"column:market_id;type:uuid;not null;index:idx_player_positions_market;uniqueIndex:idx_player_positions_unique,priority:2"`
+	Outcome      string              `gorm:"column:outcome;size:10;not null;uniqueIndex:idx_player_positions_unique,priority:3"`
 	Size         decimal.Decimal     `gorm:"column:size;type:decimal(18,6);not null"`
 	AvgPrice     decimal.NullDecimal `gorm:"column:avg_price;type:decimal(10,4)"`
 	CurrentValue decimal.NullDecimal `gorm:"column:current_value;type:decimal(18,6)"`
