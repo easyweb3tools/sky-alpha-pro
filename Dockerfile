@@ -15,10 +15,9 @@ FROM alpine:3.20
 WORKDIR /app
 
 COPY --from=builder /out/sky-alpha-pro /usr/local/bin/sky-alpha-pro
-COPY configs/config.yaml /app/configs/config.yaml
 
 ARG APP_VERSION=dev
 ENV SKY_ALPHA_APP_VERSION=${APP_VERSION}
 
 ENTRYPOINT ["sky-alpha-pro"]
-CMD ["serve", "--config", "/app/configs/config.yaml"]
+CMD ["serve"]
