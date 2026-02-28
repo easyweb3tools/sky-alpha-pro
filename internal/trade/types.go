@@ -36,7 +36,9 @@ type CancelOrderResult struct {
 }
 
 type ListTradesOptions struct {
-	Limit int
+	Limit    int
+	Status   string
+	MarketID string
 }
 
 type TradeView struct {
@@ -60,11 +62,32 @@ type TradeView struct {
 }
 
 type SignableOrder struct {
-	MarketID   string
-	Side       string
-	Outcome    string
-	Price      string
-	Size       string
-	Nonce      uint64
-	Expiration int64
+	Salt          string
+	Maker         string
+	Signer        string
+	Taker         string
+	TokenID       string
+	MakerAmount   string
+	TakerAmount   string
+	Expiration    string
+	Nonce         string
+	FeeRateBps    string
+	Side          uint8
+	SignatureType uint8
+}
+
+type SignedClobOrder struct {
+	Salt          string `json:"salt"`
+	Maker         string `json:"maker"`
+	Signer        string `json:"signer"`
+	Taker         string `json:"taker"`
+	TokenID       string `json:"tokenId"`
+	MakerAmount   string `json:"makerAmount"`
+	TakerAmount   string `json:"takerAmount"`
+	Expiration    string `json:"expiration"`
+	Nonce         string `json:"nonce"`
+	FeeRateBps    string `json:"feeRateBps"`
+	Side          string `json:"side"`
+	SignatureType uint8  `json:"signatureType"`
+	Signature     string `json:"signature"`
 }

@@ -1,8 +1,10 @@
 package server
 
 import (
+	"errors"
 	"net/http"
 	"strconv"
+	"strings"
 
 	"github.com/gin-gonic/gin"
 
@@ -36,9 +38,8 @@ func CreateTradeHandler(svc *trade.Service) gin.HandlerFunc {
 			Confirm:   req.Confirm,
 		})
 		if err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{
-				"error": gin.H{"code": "TRADE_SUBMIT_FAILED", "message": err.Error()},
-			})
+			status, code := mapTradeError(err)
+			c.JSON(status, gin.H{"error": gin.H{"code": code, "message": err.Error()}})
 			return
 		}
 		c.JSON(http.StatusOK, result)
@@ -56,9 +57,8 @@ func CancelTradeHandler(svc *trade.Service) gin.HandlerFunc {
 		}
 		result, err := svc.CancelOrder(c.Request.Context(), tradeID)
 		if err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{
-				"error": gin.H{"code": "TRADE_CANCEL_FAILED", "message": err.Error()},
-			})
+			status, code := mapTradeError(err)
+			c.JSON(status, gin.H{"error": gin.H{"code": code, "message": err.Error()}})
 			return
 		}
 		c.JSON(http.StatusOK, result)
@@ -78,8 +78,20 @@ func ListTradesHandler(svc *trade.Service) gin.HandlerFunc {
 			}
 			limit = n
 		}
-		items, err := svc.ListTrades(c.Request.Context(), trade.ListTradesOptions{Limit: limit})
+		statusFilter := strings.TrimSpace(c.Query("status"))
+		marketIDFilter := strings.TrimSpace(c.Query("market_id"))
+		items, err := svc.ListTrades(c.Request.Context(), trade.ListTradesOptions{
+			Limit:    limit,
+			Status:   statusFilter,
+			MarketID: marketIDFilter,
+		})
 		if err != nil {
+			if errors.Is(err, trade.ErrTradeInvalidRequest) {
+				c.JSON(http.StatusBadRequest, gin.H{
+					"error": gin.H{"code": "BAD_REQUEST", "message": err.Error()},
+				})
+				return
+			}
 			c.JSON(http.StatusInternalServerError, gin.H{
 				"error": gin.H{"code": "INTERNAL_ERROR", "message": err.Error()},
 			})
@@ -100,11 +112,31 @@ func GetTradeHandler(svc *trade.Service) gin.HandlerFunc {
 		}
 		item, err := svc.GetTradeByID(c.Request.Context(), tradeID)
 		if err != nil {
-			c.JSON(http.StatusNotFound, gin.H{
-				"error": gin.H{"code": "NOT_FOUND", "message": err.Error()},
-			})
+			status, code := mapTradeError(err)
+			c.JSON(status, gin.H{"error": gin.H{"code": code, "message": err.Error()}})
 			return
 		}
 		c.JSON(http.StatusOK, item)
+	}
+}
+
+func mapTradeError(err error) (int, string) {
+	switch {
+	case errors.Is(err, trade.ErrTradeInvalidRequest):
+		return http.StatusBadRequest, "BAD_REQUEST"
+	case errors.Is(err, trade.ErrTradeRiskRejected):
+		return http.StatusUnprocessableEntity, "RISK_REJECTED"
+	case errors.Is(err, trade.ErrTradeNotFound):
+		return http.StatusNotFound, "NOT_FOUND"
+	case errors.Is(err, trade.ErrTradeNotCancellable):
+		return http.StatusConflict, "TRADE_NOT_CANCELLABLE"
+	case errors.Is(err, trade.ErrTradeCLOB):
+		return http.StatusBadGateway, "CLOB_REQUEST_FAILED"
+	case errors.Is(err, trade.ErrTradePersistence):
+		return http.StatusInternalServerError, "TRADE_PERSISTENCE_FAILED"
+	case errors.Is(err, trade.ErrTradeConfig):
+		return http.StatusInternalServerError, "TRADE_CONFIG_ERROR"
+	default:
+		return http.StatusInternalServerError, "TRADE_ERROR"
 	}
 }

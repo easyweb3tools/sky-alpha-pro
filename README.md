@@ -51,6 +51,7 @@ Week 7 delivery:
 - EIP-712 order signing support
 - CLOB order submit/cancel integration (`POST /order`, `DELETE /order/:id`)
 - server-side risk checks (edge/liquidity/position size/open positions/daily loss/duplicate cooldown)
+- trade error code mapping (`400/422/502/500`) for better caller handling
 - trade APIs: `POST /api/v1/trades`, `DELETE /api/v1/trades/:id`, `GET /api/v1/trades`, `GET /api/v1/trades/:id`
 - trade CLI: `trade buy`, `trade sell`, `trade cancel`, `trade list`
 
@@ -194,7 +195,7 @@ CLI:
 go run ./cmd/sky-alpha-pro trade buy <market_id> --outcome YES --price 0.65 --size 10 --confirm
 go run ./cmd/sky-alpha-pro trade sell <market_id> --outcome NO --price 0.42 --size 8 --confirm
 go run ./cmd/sky-alpha-pro trade cancel <trade_id>
-go run ./cmd/sky-alpha-pro trade list --limit 20
+go run ./cmd/sky-alpha-pro trade list --limit 20 --status placed --market-id <market_id>
 ```
 
 REST API:
@@ -203,7 +204,7 @@ REST API:
 curl -X POST http://127.0.0.1:8080/api/v1/trades \
   -H "Content-Type: application/json" \
   -d '{"market_id":"<market_id>","side":"BUY","outcome":"YES","price":0.65,"size":10,"confirm":true}'
-curl "http://127.0.0.1:8080/api/v1/trades?limit=20"
+curl "http://127.0.0.1:8080/api/v1/trades?limit=20&status=placed&market_id=<market_id>"
 curl "http://127.0.0.1:8080/api/v1/trades/1"
 curl -X DELETE "http://127.0.0.1:8080/api/v1/trades/1"
 ```
@@ -214,8 +215,12 @@ Required config:
 trade:
   private_key: "<hex_private_key>"
   chain_id: 137
+  max_order_size: 0 # 0 disables the limit
   confirmation_required: true
 ```
+
+`private_key` 仅建议通过安全的环境变量/密钥管理系统注入，不要写入版本控制文件。
+当前实现已对齐 CTF Exchange 的 EIP-712 订单结构；若直连真实 CLOB，还需要配置 `POLY_*` 认证头（API key/secret/passphrase）链路。
 
 ## Container
 

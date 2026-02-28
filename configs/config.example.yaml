@@ -46,6 +46,7 @@ agent:
 trade:
   private_key: ""
   chain_id: 137
+  max_order_size: 0
   max_position_size: 100
   max_daily_loss: 50
   min_edge_pct: 5

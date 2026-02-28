@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"strings"
@@ -25,14 +26,9 @@ func NewCLOBClient(baseURL string, client *http.Client) *CLOBClient {
 }
 
 type placeOrderPayload struct {
-	MarketID   string `json:"market_id"`
-	Side       string `json:"side"`
-	Outcome    string `json:"outcome"`
-	Price      string `json:"price"`
-	Size       string `json:"size"`
-	Signature  string `json:"signature"`
-	Expiration int64  `json:"expiration"`
-	Nonce      uint64 `json:"nonce"`
+	Order     SignedClobOrder `json:"order"`
+	OrderType string          `json:"orderType"`
+	Owner     string          `json:"owner,omitempty"`
 }
 
 func (c *CLOBClient) PlaceOrder(ctx context.Context, payload placeOrderPayload) (string, error) {
@@ -42,23 +38,23 @@ func (c *CLOBClient) PlaceOrder(ctx context.Context, payload placeOrderPayload) 
 	}
 	endpoint := c.baseURL + "/order"
 
-	resp, err := httpretry.DoRequestWithRetry(ctx, c.client, func() (*http.Request, error) {
-		req, buildErr := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
-		if buildErr != nil {
-			return nil, buildErr
-		}
-		req.Header.Set("Accept", "application/json")
-		req.Header.Set("Content-Type", "application/json")
-		req.Header.Set("User-Agent", "sky-alpha-pro/0.1.0")
-		return req, nil
-	}, 3)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("User-Agent", "sky-alpha-pro/0.1.0")
+
+	resp, err := c.client.Do(req)
 	if err != nil {
 		return "", err
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return "", fmt.Errorf("clob place order status: %d", resp.StatusCode)
+		msg, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
+		return "", fmt.Errorf("clob place order status: %d body=%s", resp.StatusCode, strings.TrimSpace(string(msg)))
 	}
 
 	var decoded any
@@ -88,7 +84,8 @@ func (c *CLOBClient) CancelOrder(ctx context.Context, orderID string) error {
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return fmt.Errorf("clob cancel order status: %d", resp.StatusCode)
+		msg, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
+		return fmt.Errorf("clob cancel order status: %d body=%s", resp.StatusCode, strings.TrimSpace(string(msg)))
 	}
 	return nil
 }

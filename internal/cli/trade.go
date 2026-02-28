@@ -132,7 +132,11 @@ func newTradeCancelCmd() *cobra.Command {
 }
 
 func newTradeListCmd() *cobra.Command {
-	var limit int
+	var (
+		limit    int
+		status   string
+		marketID string
+	)
 	cmd := &cobra.Command{
 		Use:   "list",
 		Short: "List trade records",
@@ -148,7 +152,11 @@ func newTradeListCmd() *cobra.Command {
 
 			signalSvc := signal.NewService(appConfig.Signal, db, appLogger)
 			svc := trade.NewService(appConfig.Trade, appConfig.Market, db, appLogger, signalSvc)
-			items, err := svc.ListTrades(context.Background(), trade.ListTradesOptions{Limit: limit})
+			items, err := svc.ListTrades(context.Background(), trade.ListTradesOptions{
+				Limit:    limit,
+				Status:   status,
+				MarketID: marketID,
+			})
 			if err != nil {
 				return err
 			}
@@ -168,5 +176,7 @@ func newTradeListCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().IntVar(&limit, "limit", 20, "result size limit")
+	cmd.Flags().StringVar(&status, "status", "", "status filter (pending/placed/partially_filled/filled/cancelled/closed/failed)")
+	cmd.Flags().StringVar(&marketID, "market-id", "", "market id filter")
 	return cmd
 }

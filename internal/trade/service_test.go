@@ -2,6 +2,8 @@ package trade
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -21,9 +23,22 @@ func TestSubmitOrderAndCancel(t *testing.T) {
 	seedTradeFixtures(t, db)
 
 	var cancelCalled bool
+	var sawOrderSchema bool
 	clob := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.Method == http.MethodPost && r.URL.Path == "/order":
+			var payload map[string]any
+			if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+				t.Fatalf("decode payload: %v", err)
+			}
+			order, ok := payload["order"].(map[string]any)
+			if !ok {
+				t.Fatalf("order payload missing")
+			}
+			if order["tokenId"] == nil || order["makerAmount"] == nil || order["takerAmount"] == nil {
+				t.Fatalf("unexpected order schema: %#v", order)
+			}
+			sawOrderSchema = true
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = w.Write([]byte(`{"orderID":"oid-1"}`))
 		case r.Method == http.MethodDelete && r.URL.Path == "/order/oid-1":
@@ -56,7 +71,7 @@ func TestSubmitOrderAndCancel(t *testing.T) {
 	if err != nil {
 		t.Fatalf("cancel order: %v", err)
 	}
-	if !cancelCalled || !cancel.Cancelled {
+	if !sawOrderSchema || !cancelCalled || !cancel.Cancelled {
 		t.Fatalf("expected cancel to be called")
 	}
 }
@@ -83,6 +98,84 @@ func TestSubmitOrderRiskReject(t *testing.T) {
 	if err == nil {
 		t.Fatalf("expected risk reject")
 	}
+	if !errors.Is(err, ErrTradeRiskRejected) {
+		t.Fatalf("expected ErrTradeRiskRejected, got: %v", err)
+	}
+}
+
+func TestCancelOrderRejectsNonCancellableStatus(t *testing.T) {
+	db := setupTradeTestDB(t)
+	seedTradeFixtures(t, db)
+
+	now := time.Now().UTC()
+	if err := db.Exec(
+		"INSERT INTO trades(market_id, order_id, side, outcome, price, size, cost_usdc, status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+		"market-1", "oid-filled", "BUY", "YES", "0.50", "1.00", "0.50", "filled", now,
+	).Error; err != nil {
+		t.Fatalf("insert trade: %v", err)
+	}
+
+	clob := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Fatalf("unexpected clob call for non-cancellable status")
+	}))
+	defer clob.Close()
+
+	svc := newTradeServiceForTest(db, clob.URL)
+	_, err := svc.CancelOrder(context.Background(), 1)
+	if err == nil {
+		t.Fatalf("expected cancel rejection")
+	}
+	if !errors.Is(err, ErrTradeNotCancellable) {
+		t.Fatalf("expected ErrTradeNotCancellable, got: %v", err)
+	}
+}
+
+func TestListTradesWithFilters(t *testing.T) {
+	db := setupTradeTestDB(t)
+	seedTradeFixtures(t, db)
+
+	now := time.Now().UTC()
+	inserts := []struct {
+		MarketID string
+		OrderID  string
+		Status   string
+	}{
+		{MarketID: "market-1", OrderID: "oid-1", Status: "placed"},
+		{MarketID: "market-2", OrderID: "oid-2", Status: "filled"},
+		{MarketID: "market-1", OrderID: "oid-3", Status: "filled"},
+	}
+	for _, it := range inserts {
+		if err := db.Exec(
+			"INSERT INTO trades(market_id, order_id, side, outcome, price, size, cost_usdc, status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+			it.MarketID, it.OrderID, "BUY", "YES", "0.50", "1.00", "0.50", it.Status, now,
+		).Error; err != nil {
+			t.Fatalf("insert trade: %v", err)
+		}
+	}
+
+	svc := newTradeServiceForTest(db, "http://127.0.0.1:1")
+	filtered, err := svc.ListTrades(context.Background(), ListTradesOptions{
+		Limit:    10,
+		Status:   "filled",
+		MarketID: "market-1",
+	})
+	if err != nil {
+		t.Fatalf("list trades: %v", err)
+	}
+	if len(filtered) != 1 {
+		t.Fatalf("expected 1 trade, got %d", len(filtered))
+	}
+	if filtered[0].OrderID != "oid-3" {
+		t.Fatalf("unexpected trade: %+v", filtered[0])
+	}
+
+	_, err = svc.ListTrades(context.Background(), ListTradesOptions{Limit: 10, Status: "bad_status"})
+	if err == nil {
+		t.Fatalf("expected invalid status error")
+	}
+	if !errors.Is(err, ErrTradeInvalidRequest) {
+		t.Fatalf("expected ErrTradeInvalidRequest, got: %v", err)
+	}
 }
 
 func setupTradeTestDB(t *testing.T) *gorm.DB {
@@ -104,7 +197,9 @@ func setupTradeTestDB(t *testing.T) *gorm.DB {
 			id TEXT PRIMARY KEY,
 			polymarket_id TEXT,
 			is_active NUMERIC,
-			liquidity DECIMAL(18,2)
+			liquidity DECIMAL(18,2),
+			token_id_yes TEXT,
+			token_id_no TEXT
 		)`,
 		`CREATE TABLE signals (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -144,8 +239,14 @@ func seedTradeFixtures(t *testing.T, db *gorm.DB) {
 	t.Helper()
 	now := time.Now().UTC()
 	if err := db.Exec(
-		"INSERT INTO markets(id, polymarket_id, is_active, liquidity) VALUES (?, ?, ?, ?)",
-		"market-1", "poly-1", true, "2500.00",
+		"INSERT INTO markets(id, polymarket_id, is_active, liquidity, token_id_yes, token_id_no) VALUES (?, ?, ?, ?, ?, ?)",
+		"market-1", "poly-1", true, "2500.00", "1000001", "1000002",
+	).Error; err != nil {
+		t.Fatalf("insert market: %v", err)
+	}
+	if err := db.Exec(
+		"INSERT INTO markets(id, polymarket_id, is_active, liquidity, token_id_yes, token_id_no) VALUES (?, ?, ?, ?, ?, ?)",
+		"market-2", "poly-2", true, "2500.00", "2000001", "2000002",
 	).Error; err != nil {
 		t.Fatalf("insert market: %v", err)
 	}
@@ -170,6 +271,7 @@ func newTradeServiceForTest(db *gorm.DB, clobURL string) *Service {
 	return NewService(config.TradeConfig{
 		PrivateKeyHex:        "4c0883a69102937d6231471b5dbb6204fe512961708279f7b00f6d0f7a4f2f5f",
 		ChainID:              137,
+		MaxOrderSize:         0,
 		MaxPositionSize:      100,
 		MaxDailyLoss:         50,
 		MinEdgePct:           5,

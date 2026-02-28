@@ -87,6 +87,7 @@ type AgentConfig struct {
 type TradeConfig struct {
 	PrivateKeyHex        string  `mapstructure:"private_key"`
 	ChainID              int64   `mapstructure:"chain_id"`
+	MaxOrderSize         float64 `mapstructure:"max_order_size"`
 	MaxPositionSize      float64 `mapstructure:"max_position_size"`
 	MaxDailyLoss         float64 `mapstructure:"max_daily_loss"`
 	MinEdgePct           float64 `mapstructure:"min_edge_pct"`
@@ -174,6 +175,7 @@ func setDefaults(v *viper.Viper) {
 
 	v.SetDefault("trade.private_key", "")
 	v.SetDefault("trade.chain_id", 137)
+	v.SetDefault("trade.max_order_size", 0.0)
 	v.SetDefault("trade.max_position_size", 100.0)
 	v.SetDefault("trade.max_daily_loss", 50.0)
 	v.SetDefault("trade.min_edge_pct", 5.0)
