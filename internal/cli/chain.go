@@ -191,7 +191,7 @@ func newChainWatchCmd() *cobra.Command {
 			defer ticker.Stop()
 
 			for {
-				if err := runOneWatchCycle(cmd, svc, lookback, maxTx, limit); err != nil {
+				if err := runOneWatchCycle(stopCtx, interval, cmd, svc, lookback, maxTx, limit); err != nil {
 					fmt.Fprintf(cmd.ErrOrStderr(), "chain watch cycle error: %v\n", err)
 				}
 				select {
@@ -210,15 +210,22 @@ func newChainWatchCmd() *cobra.Command {
 	return cmd
 }
 
-func runOneWatchCycle(cmd *cobra.Command, svc *chain.Service, lookback uint64, maxTx int, limit int) error {
-	result, err := svc.Scan(context.Background(), chain.ScanOptions{
+func runOneWatchCycle(stopCtx context.Context, interval time.Duration, cmd *cobra.Command, svc *chain.Service, lookback uint64, maxTx int, limit int) error {
+	timeout := interval * 2
+	if timeout < 15*time.Second {
+		timeout = 15 * time.Second
+	}
+	cycleCtx, cancel := context.WithTimeout(stopCtx, timeout)
+	defer cancel()
+
+	result, err := svc.Scan(cycleCtx, chain.ScanOptions{
 		LookbackBlocks: lookback,
 		MaxTx:          maxTx,
 	})
 	if err != nil {
 		return err
 	}
-	bots, err := svc.ListCompetitors(context.Background(), chain.ListCompetitorsOptions{
+	bots, err := svc.ListCompetitors(cycleCtx, chain.ListCompetitorsOptions{
 		OnlyBots: true,
 		Limit:    limit,
 	})

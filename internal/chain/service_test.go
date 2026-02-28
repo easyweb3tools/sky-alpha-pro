@@ -3,6 +3,8 @@ package chain
 import (
 	"context"
 	"crypto/ecdsa"
+	"encoding/hex"
+	"errors"
 	"math/big"
 	"sort"
 	"strings"
@@ -23,17 +25,25 @@ import (
 )
 
 type mockEthClient struct {
-	latestBlock uint64
-	logs        []ethtypes.Log
-	txs         map[common.Hash]*ethtypes.Transaction
-	headers     map[uint64]*ethtypes.Header
+	latestBlock    uint64
+	logs           []ethtypes.Log
+	txs            map[common.Hash]*ethtypes.Transaction
+	headers        map[uint64]*ethtypes.Header
+	blockNumberErr error
+	filterLogsErr  error
 }
 
 func (m *mockEthClient) BlockNumber(context.Context) (uint64, error) {
+	if m.blockNumberErr != nil {
+		return 0, m.blockNumberErr
+	}
 	return m.latestBlock, nil
 }
 
 func (m *mockEthClient) FilterLogs(_ context.Context, q ethereum.FilterQuery) ([]ethtypes.Log, error) {
+	if m.filterLogsErr != nil {
+		return nil, m.filterLogsErr
+	}
 	out := make([]ethtypes.Log, 0, len(m.logs))
 	for _, lg := range m.logs {
 		if q.FromBlock != nil && lg.BlockNumber < q.FromBlock.Uint64() {
@@ -51,6 +61,21 @@ func (m *mockEthClient) FilterLogs(_ context.Context, q ethereum.FilterQuery) ([
 				}
 			}
 			if !matched {
+				continue
+			}
+		}
+		if len(q.Topics) > 0 && len(q.Topics[0]) > 0 {
+			if len(lg.Topics) == 0 {
+				continue
+			}
+			topicMatched := false
+			for _, topic := range q.Topics[0] {
+				if lg.Topics[0] == topic {
+					topicMatched = true
+					break
+				}
+			}
+			if !topicMatched {
 				continue
 			}
 		}
@@ -87,13 +112,20 @@ func TestScanAndDetectBots(t *testing.T) {
 		CTFExchangeAddress:     "0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E",
 		NegRiskExchangeAddress: "0xC5d563A36AE78145C45a50134d48A1215220f80a",
 		ScanLookbackBlocks:     500,
-		BotMinTrades:           3,
-		BotMaxAvgIntervalSec:   10,
+		// intentionally high: validates opts override is applied
+		BotMinTrades:         99,
+		BotMaxAvgIntervalSec: 1,
 	}, db, zap.NewNop(), client)
 
-	res, err := svc.Scan(context.Background(), ScanOptions{})
+	res, err := svc.Scan(context.Background(), ScanOptions{
+		BotMinTrades:         3,
+		BotMaxAvgIntervalSec: 10,
+	})
 	if err != nil {
 		t.Fatalf("scan: %v", err)
+	}
+	if res.ObservedLogs != 4 {
+		t.Fatalf("expected observed logs 4 after topic filter, got %d", res.ObservedLogs)
 	}
 	if res.InsertedTrades != 4 {
 		t.Fatalf("expected inserted 4, got %d", res.InsertedTrades)
@@ -136,8 +168,19 @@ func TestScanAndDetectBots(t *testing.T) {
 	}) {
 		t.Fatalf("expected trades sorted by timestamp desc")
 	}
+	for _, tr := range trades {
+		if tr.MarketID == "" {
+			t.Fatalf("expected market id decoded from token id")
+		}
+		if tr.Side == "" || tr.Outcome == "" {
+			t.Fatalf("expected side/outcome decoded")
+		}
+		if tr.AmountUSDC == nil || *tr.AmountUSDC <= 0 {
+			t.Fatalf("expected amount_usdc decoded")
+		}
+	}
 
-	res2, err := svc.Scan(context.Background(), ScanOptions{})
+	res2, err := svc.Scan(context.Background(), ScanOptions{BotMinTrades: 3, BotMaxAvgIntervalSec: 10})
 	if err != nil {
 		t.Fatalf("scan second run: %v", err)
 	}
@@ -162,6 +205,24 @@ func TestGetCompetitorInvalidAddress(t *testing.T) {
 	}
 }
 
+func TestScanBlockNumberError(t *testing.T) {
+	db := setupChainTestDB(t)
+	svc := newServiceWithClient(config.ChainConfig{
+		RPCURL:                 "http://mock",
+		ChainID:                137,
+		CTFExchangeAddress:     "0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E",
+		NegRiskExchangeAddress: "0xC5d563A36AE78145C45a50134d48A1215220f80a",
+	}, db, zap.NewNop(), &mockEthClient{blockNumberErr: errors.New("rpc down")})
+
+	_, err := svc.Scan(context.Background(), ScanOptions{})
+	if err == nil {
+		t.Fatalf("expected block number error")
+	}
+	if !errors.Is(err, ErrChainUnavailable) {
+		t.Fatalf("expected ErrChainUnavailable, got %v", err)
+	}
+}
+
 func setupChainTestDB(t *testing.T) *gorm.DB {
 	t.Helper()
 	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{Logger: logger.Default.LogMode(logger.Silent)})
@@ -170,6 +231,22 @@ func setupChainTestDB(t *testing.T) *gorm.DB {
 	}
 	if err := db.AutoMigrate(&model.Competitor{}, &model.CompetitorTrade{}); err != nil {
 		t.Fatalf("migrate: %v", err)
+	}
+	if err := db.Exec(`
+		CREATE TABLE markets (
+			id TEXT PRIMARY KEY,
+			token_id_yes TEXT,
+			token_id_no TEXT
+		)
+	`).Error; err != nil {
+		t.Fatalf("create markets table: %v", err)
+	}
+	if err := db.Exec(`
+		INSERT INTO markets (id, token_id_yes, token_id_no) VALUES
+			('00000000-0000-0000-0000-000000000111', '111', '112'),
+			('00000000-0000-0000-0000-000000000222', '221', '222')
+	`).Error; err != nil {
+		t.Fatalf("seed markets: %v", err)
 	}
 	return db
 }
@@ -189,6 +266,7 @@ func buildMockEthClient(t *testing.T) (*mockEthClient, string) {
 		t.Fatalf("human key: %v", err)
 	}
 	botAddr := strings.ToLower(crypto.PubkeyToAddress(botKey.PublicKey).Hex())
+	humanAddr := strings.ToLower(crypto.PubkeyToAddress(humanKey.PublicKey).Hex())
 
 	tx1 := mustSignedTx(t, signer, botKey, exchange, 1)
 	tx2 := mustSignedTx(t, signer, botKey, exchange, 2)
@@ -202,13 +280,16 @@ func buildMockEthClient(t *testing.T) (*mockEthClient, string) {
 		160: {Number: new(big.Int).SetUint64(160), Time: uint64(time.Date(2026, 1, 1, 0, 10, 0, 0, time.UTC).Unix())},
 	}
 
+	irrelevantTopic := crypto.Keccak256Hash([]byte("Approval(address,address,uint256)"))
+
 	return &mockEthClient{
 		latestBlock: 200,
 		logs: []ethtypes.Log{
-			{Address: exchange, BlockNumber: 100, TxHash: tx1.Hash()},
-			{Address: exchange, BlockNumber: 101, TxHash: tx2.Hash()},
-			{Address: exchange, BlockNumber: 102, TxHash: tx3.Hash()},
-			{Address: exchange, BlockNumber: 160, TxHash: tx4.Hash()},
+			buildOrderFilledLog(tx1.Hash(), exchange, 100, botAddr, humanAddr, 0, 111, 5_500_000, 11_000_000, 0),
+			buildOrderFilledLog(tx2.Hash(), exchange, 101, botAddr, humanAddr, 0, 111, 6_500_000, 13_000_000, 0),
+			buildOrderFilledLog(tx3.Hash(), exchange, 102, botAddr, humanAddr, 0, 111, 4_500_000, 9_000_000, 0),
+			buildOrderFilledLog(tx4.Hash(), exchange, 160, humanAddr, botAddr, 222, 0, 7_000_000, 3_500_000, 0),
+			{Address: exchange, BlockNumber: 170, TxHash: tx4.Hash(), Topics: []common.Hash{irrelevantTopic}},
 		},
 		txs: map[common.Hash]*ethtypes.Transaction{
 			tx1.Hash(): tx1,
@@ -228,4 +309,38 @@ func mustSignedTx(t *testing.T, signer ethtypes.Signer, key *ecdsa.PrivateKey, t
 		t.Fatalf("sign tx: %v", err)
 	}
 	return signed
+}
+
+func buildOrderFilledLog(txHash common.Hash, exchange common.Address, block uint64, maker string, taker string, makerAsset, takerAsset, makerAmount, takerAmount, fee uint64) ethtypes.Log {
+	makerAddr := common.HexToAddress(maker)
+	takerAddr := common.HexToAddress(taker)
+	dataHex := encodeOrderFilledData(
+		new(big.Int).SetUint64(makerAsset),
+		new(big.Int).SetUint64(takerAsset),
+		new(big.Int).SetUint64(makerAmount),
+		new(big.Int).SetUint64(takerAmount),
+		new(big.Int).SetUint64(fee),
+	)
+	data, _ := hex.DecodeString(dataHex)
+	return ethtypes.Log{
+		Address:     exchange,
+		BlockNumber: block,
+		TxHash:      txHash,
+		Topics: []common.Hash{
+			orderFilledEventTopic,
+			txHash,
+			common.BytesToHash(common.LeftPadBytes(makerAddr.Bytes(), 32)),
+			common.BytesToHash(common.LeftPadBytes(takerAddr.Bytes(), 32)),
+		},
+		Data: data,
+	}
+}
+
+func encodeOrderFilledData(fields ...*big.Int) string {
+	out := ""
+	for _, f := range fields {
+		b := common.LeftPadBytes(f.Bytes(), 32)
+		out += hex.EncodeToString(b)
+	}
+	return out
 }
