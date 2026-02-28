@@ -64,6 +64,7 @@ func init() {
 	rootCmd.AddCommand(newWeatherCmd())
 	rootCmd.AddCommand(newSignalCmd())
 	rootCmd.AddCommand(newAgentCmd())
+	rootCmd.AddCommand(newTradeCmd())
 }
 
 func Execute() error {

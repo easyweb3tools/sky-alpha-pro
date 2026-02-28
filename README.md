@@ -46,6 +46,14 @@ Week 6 delivery:
 - agent APIs: `POST /api/v1/agent/analyze`, `GET /api/v1/agent/signals`, `GET /api/v1/agent/signals/:id`
 - agent CLI: `agent analyze`, `agent signals`
 
+Week 7 delivery:
+
+- EIP-712 order signing support
+- CLOB order submit/cancel integration (`POST /order`, `DELETE /order/:id`)
+- server-side risk checks (edge/liquidity/position size/open positions/daily loss/duplicate cooldown)
+- trade APIs: `POST /api/v1/trades`, `DELETE /api/v1/trades/:id`, `GET /api/v1/trades`, `GET /api/v1/trades/:id`
+- trade CLI: `trade buy`, `trade sell`, `trade cancel`, `trade list`
+
 ## MVP Database Rule
 
 MVP 阶段数据库表结构统一由 GORM `AutoMigrate` 管理：
@@ -176,6 +184,37 @@ curl -X POST http://127.0.0.1:8080/api/v1/agent/analyze \
   -H "Content-Type: application/json" \
   -d '{"market_id":"<market_id>","depth":"full"}'
 curl "http://127.0.0.1:8080/api/v1/agent/signals?limit=20&min_edge=5"
+```
+
+## Trade Execution (W7)
+
+CLI:
+
+```bash
+go run ./cmd/sky-alpha-pro trade buy <market_id> --outcome YES --price 0.65 --size 10 --confirm
+go run ./cmd/sky-alpha-pro trade sell <market_id> --outcome NO --price 0.42 --size 8 --confirm
+go run ./cmd/sky-alpha-pro trade cancel <trade_id>
+go run ./cmd/sky-alpha-pro trade list --limit 20
+```
+
+REST API:
+
+```bash
+curl -X POST http://127.0.0.1:8080/api/v1/trades \
+  -H "Content-Type: application/json" \
+  -d '{"market_id":"<market_id>","side":"BUY","outcome":"YES","price":0.65,"size":10,"confirm":true}'
+curl "http://127.0.0.1:8080/api/v1/trades?limit=20"
+curl "http://127.0.0.1:8080/api/v1/trades/1"
+curl -X DELETE "http://127.0.0.1:8080/api/v1/trades/1"
+```
+
+Required config:
+
+```yaml
+trade:
+  private_key: "<hex_private_key>"
+  chain_id: 137
+  confirmation_required: true
 ```
 
 ## Container

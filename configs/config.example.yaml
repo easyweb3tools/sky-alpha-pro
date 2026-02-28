@@ -43,6 +43,16 @@ agent:
   market_timeout: 20s
   max_forecast_days: 10
 
+trade:
+  private_key: ""
+  chain_id: 137
+  max_position_size: 100
+  max_daily_loss: 50
+  min_edge_pct: 5
+  max_open_positions: 10
+  min_liquidity: 1000
+  confirmation_required: true
+
 database:
   host: 127.0.0.1
   port: 5432

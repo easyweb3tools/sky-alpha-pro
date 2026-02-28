@@ -10,6 +10,7 @@ import (
 	"sky-alpha-pro/internal/agent"
 	"sky-alpha-pro/internal/market"
 	"sky-alpha-pro/internal/signal"
+	"sky-alpha-pro/internal/trade"
 	"sky-alpha-pro/internal/weather"
 	"sky-alpha-pro/pkg/config"
 )
@@ -25,6 +26,7 @@ func NewRouter(cfg *config.Config, log *zap.Logger, db *gorm.DB) http.Handler {
 	weatherSvc := weather.NewService(cfg.Weather, db, log)
 	signalSvc := signal.NewService(cfg.Signal, db, log)
 	agentSvc := agent.NewService(cfg.Agent, db, log, weatherSvc, signalSvc)
+	tradeSvc := trade.NewService(cfg.Trade, cfg.Market, db, log, signalSvc)
 
 	api := router.Group("/api/v1")
 	{
@@ -35,6 +37,10 @@ func NewRouter(cfg *config.Config, log *zap.Logger, db *gorm.DB) http.Handler {
 		api.GET("/weather/observation/:station", GetObservationHandler(weatherSvc))
 		api.GET("/signals", ListSignalsHandler(signalSvc))
 		api.POST("/signals/generate", GenerateSignalsHandler(signalSvc))
+		api.GET("/trades", ListTradesHandler(tradeSvc))
+		api.GET("/trades/:id", GetTradeHandler(tradeSvc))
+		api.POST("/trades", CreateTradeHandler(tradeSvc))
+		api.DELETE("/trades/:id", CancelTradeHandler(tradeSvc))
 		api.POST("/agent/analyze", AnalyzeAgentHandler(agentSvc))
 		api.GET("/agent/signals", ListSignalsHandler(signalSvc))
 		api.GET("/agent/signals/:id", GetAgentSignalHandler(signalSvc))

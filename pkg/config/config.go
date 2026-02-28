@@ -16,6 +16,7 @@ type Config struct {
 	Weather  WeatherConfig  `mapstructure:"weather"`
 	Signal   SignalConfig   `mapstructure:"signal"`
 	Agent    AgentConfig    `mapstructure:"agent"`
+	Trade    TradeConfig    `mapstructure:"trade"`
 	Database DatabaseConfig `mapstructure:"database"`
 	Log      LogConfig      `mapstructure:"log"`
 }
@@ -81,6 +82,17 @@ type AgentConfig struct {
 	Concurrency     int           `mapstructure:"concurrency"`
 	MarketTimeout   time.Duration `mapstructure:"market_timeout"`
 	MaxForecastDays int           `mapstructure:"max_forecast_days"`
+}
+
+type TradeConfig struct {
+	PrivateKeyHex        string  `mapstructure:"private_key"`
+	ChainID              int64   `mapstructure:"chain_id"`
+	MaxPositionSize      float64 `mapstructure:"max_position_size"`
+	MaxDailyLoss         float64 `mapstructure:"max_daily_loss"`
+	MinEdgePct           float64 `mapstructure:"min_edge_pct"`
+	MaxOpenPositions     int     `mapstructure:"max_open_positions"`
+	MinLiquidity         float64 `mapstructure:"min_liquidity"`
+	ConfirmationRequired bool    `mapstructure:"confirmation_required"`
 }
 
 type LogConfig struct {
@@ -159,6 +171,15 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("agent.concurrency", 8)
 	v.SetDefault("agent.market_timeout", "20s")
 	v.SetDefault("agent.max_forecast_days", 10)
+
+	v.SetDefault("trade.private_key", "")
+	v.SetDefault("trade.chain_id", 137)
+	v.SetDefault("trade.max_position_size", 100.0)
+	v.SetDefault("trade.max_daily_loss", 50.0)
+	v.SetDefault("trade.min_edge_pct", 5.0)
+	v.SetDefault("trade.max_open_positions", 10)
+	v.SetDefault("trade.min_liquidity", 1000.0)
+	v.SetDefault("trade.confirmation_required", true)
 
 	v.SetDefault("database.host", "127.0.0.1")
 	v.SetDefault("database.port", 5432)
