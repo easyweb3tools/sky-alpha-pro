@@ -16,6 +16,7 @@ type GenerateResult struct {
 type SignalView struct {
 	ID          uint64    `json:"id"`
 	MarketID    string    `json:"market_id"`
+	SignalDate  time.Time `json:"signal_date"`
 	Direction   string    `json:"direction"`
 	EdgePct     float64   `json:"edge_pct"`
 	Confidence  float64   `json:"confidence"`

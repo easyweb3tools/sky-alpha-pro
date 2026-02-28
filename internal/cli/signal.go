@@ -98,10 +98,10 @@ func newSignalListCmd() *cobra.Command {
 				return enc.Encode(items)
 			}
 			w := tabwriter.NewWriter(cmd.OutOrStdout(), 0, 4, 2, ' ', 0)
-			fmt.Fprintln(w, "ID\tMARKET_ID\tDIR\tEDGE_PCT\tCONF\tPRICE\tESTIMATE\tCREATED_AT")
+			fmt.Fprintln(w, "ID\tMARKET_ID\tDATE\tDIR\tEDGE_PCT\tCONF\tPRICE\tESTIMATE\tCREATED_AT")
 			for _, it := range items {
-				fmt.Fprintf(w, "%d\t%s\t%s\t%.2f\t%.1f\t%.4f\t%.4f\t%s\n",
-					it.ID, it.MarketID, it.Direction, it.EdgePct, it.Confidence,
+				fmt.Fprintf(w, "%d\t%s\t%s\t%s\t%.2f\t%.1f\t%.4f\t%.4f\t%s\n",
+					it.ID, it.MarketID, it.SignalDate.UTC().Format("2006-01-02"), it.Direction, it.EdgePct, it.Confidence,
 					it.MarketPrice, it.OurEstimate, it.CreatedAt.UTC().Format(time.RFC3339))
 			}
 			return w.Flush()

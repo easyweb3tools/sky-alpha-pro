@@ -49,8 +49,9 @@ type Forecast struct {
 	MarketID      *string        `gorm:"column:market_id;type:uuid;index:idx_forecasts_market,priority:1"`
 	StationID     string         `gorm:"column:station_id;size:20;index:idx_forecasts_station_date,priority:1"`
 	Location      string         `gorm:"column:location;size:255;not null;uniqueIndex:idx_forecasts_unique,priority:1"`
-	ForecastDate  time.Time      `gorm:"column:forecast_date;type:date;not null;index:idx_forecasts_station_date,priority:2;uniqueIndex:idx_forecasts_unique,priority:2"`
-	Source        string         `gorm:"column:source;size:30;not null;index:idx_forecasts_market,priority:2;uniqueIndex:idx_forecasts_unique,priority:3"`
+	City          string         `gorm:"column:city;size:100;index:idx_forecasts_city_date_source,priority:1"`
+	ForecastDate  time.Time      `gorm:"column:forecast_date;type:date;not null;index:idx_forecasts_station_date,priority:2;index:idx_forecasts_city_date_source,priority:2;uniqueIndex:idx_forecasts_unique,priority:2"`
+	Source        string         `gorm:"column:source;size:30;not null;index:idx_forecasts_market,priority:2;index:idx_forecasts_city_date_source,priority:3;uniqueIndex:idx_forecasts_unique,priority:3"`
 	TempHighF     float64        `gorm:"column:temp_high_f;type:decimal(5,1)"`
 	TempLowF      float64        `gorm:"column:temp_low_f;type:decimal(5,1)"`
 	PrecipIn      float64        `gorm:"column:precip_in;type:decimal(6,2)"`
@@ -85,6 +86,7 @@ type Observation struct {
 type Signal struct {
 	ID          uint64    `gorm:"column:id;primaryKey;autoIncrement"`
 	MarketID    string    `gorm:"column:market_id;type:uuid;not null;index:idx_signals_market,priority:1"`
+	SignalDate  time.Time `gorm:"column:signal_date;type:date;index:idx_signals_market_date,priority:2"`
 	SignalType  string    `gorm:"column:signal_type;size:30;not null;index:idx_signals_type,priority:1"`
 	Direction   string    `gorm:"column:direction;size:10;not null"`
 	EdgePct     float64   `gorm:"column:edge_pct;type:decimal(8,4);not null"`
@@ -94,7 +96,7 @@ type Signal struct {
 	Reasoning   string    `gorm:"column:reasoning;type:text"`
 	AIModel     string    `gorm:"column:ai_model;size:50"`
 	ActedOn     bool      `gorm:"column:acted_on;default:false"`
-	CreatedAt   time.Time `gorm:"column:created_at;not null;index:idx_signals_market,sort:desc,priority:2;index:idx_signals_type,sort:desc,priority:2"`
+	CreatedAt   time.Time `gorm:"column:created_at;not null;index:idx_signals_market,sort:desc,priority:2;index:idx_signals_type,sort:desc,priority:2;index:idx_signals_market_date,sort:desc,priority:3"`
 }
 
 type Trade struct {

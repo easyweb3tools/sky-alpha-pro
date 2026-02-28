@@ -66,9 +66,12 @@ type WeatherConfig struct {
 }
 
 type SignalConfig struct {
-	MinEdgePct   float64 `mapstructure:"min_edge_pct"`
-	MaxMarkets   int     `mapstructure:"max_markets"`
-	DefaultLimit int     `mapstructure:"default_limit"`
+	MinEdgePct          float64 `mapstructure:"min_edge_pct"`
+	MaxMarkets          int     `mapstructure:"max_markets"`
+	DefaultLimit        int     `mapstructure:"default_limit"`
+	Concurrency         int     `mapstructure:"concurrency"`
+	ForecastMaxAgeHours int     `mapstructure:"forecast_max_age_hours"`
+	MinSigma            float64 `mapstructure:"min_sigma"`
 }
 
 type LogConfig struct {
@@ -138,6 +141,9 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("signal.min_edge_pct", 5.0)
 	v.SetDefault("signal.max_markets", 500)
 	v.SetDefault("signal.default_limit", 50)
+	v.SetDefault("signal.concurrency", 10)
+	v.SetDefault("signal.forecast_max_age_hours", 24)
+	v.SetDefault("signal.min_sigma", 0.5)
 
 	v.SetDefault("database.host", "127.0.0.1")
 	v.SetDefault("database.port", 5432)

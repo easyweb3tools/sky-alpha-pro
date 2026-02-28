@@ -32,6 +32,9 @@ signal:
   min_edge_pct: 5.0
   max_markets: 500
   default_limit: 50
+  concurrency: 10
+  forecast_max_age_hours: 24
+  min_sigma: 0.5
 
 database:
   host: 127.0.0.1

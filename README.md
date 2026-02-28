@@ -33,6 +33,9 @@ Week 5 delivery:
 - probability model v1 (temperature market probability estimation)
 - edge calculation (`our_estimate - market_price`)
 - signal generation and persistence (`signals` table)
+- forecast target date uses `market.end_date - 1 day` (settlement-day alignment)
+- stale forecast filtering (default: within 24h)
+- per-market per-day signal de-duplication (update existing daily signal)
 - signal APIs: `GET /api/v1/signals`, `POST /api/v1/signals/generate`
 - signal CLI: `signal generate`, `signal list`
 

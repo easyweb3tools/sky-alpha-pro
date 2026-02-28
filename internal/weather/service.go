@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -150,6 +151,7 @@ func (s *Service) persistForecasts(ctx context.Context, forecasts []ForecastEntr
 			MarketID:      nil,
 			StationID:     "",
 			Location:      f.Location,
+			City:          normalizeCityKey(f.Location),
 			ForecastDate:  f.ForecastDate.UTC(),
 			Source:        f.Source,
 			TempHighF:     f.TempHighF,
@@ -170,6 +172,7 @@ func (s *Service) persistForecasts(ctx context.Context, forecasts []ForecastEntr
 					{Name: "source"},
 				},
 				DoUpdates: clause.Assignments(map[string]any{
+					"city":            row.City,
 					"temp_high_f":     row.TempHighF,
 					"temp_low_f":      row.TempLowF,
 					"precip_in":       row.PrecipIn,
@@ -221,4 +224,23 @@ func normalizeSources(source string) []string {
 	default:
 		return []string{"openmeteo"}
 	}
+}
+
+func normalizeCityKey(location string) string {
+	v := strings.TrimSpace(location)
+	if v == "" {
+		return ""
+	}
+	parts := strings.Split(v, ",")
+	if len(parts) >= 2 {
+		if _, err := strconv.ParseFloat(strings.TrimSpace(parts[0]), 64); err == nil {
+			if _, err2 := strconv.ParseFloat(strings.TrimSpace(parts[1]), 64); err2 == nil {
+				return ""
+			}
+		}
+	}
+	if idx := strings.Index(v, ","); idx > 0 {
+		v = v[:idx]
+	}
+	return strings.ToLower(strings.TrimSpace(v))
 }
