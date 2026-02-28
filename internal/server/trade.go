@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/gin-gonic/gin"
 
@@ -117,6 +118,58 @@ func GetTradeHandler(svc *trade.Service) gin.HandlerFunc {
 			return
 		}
 		c.JSON(http.StatusOK, item)
+	}
+}
+
+func ListPositionsHandler(svc *trade.Service) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		marketID := strings.TrimSpace(c.Query("market_id"))
+		items, err := svc.ListPositions(c.Request.Context(), trade.ListPositionsOptions{MarketID: marketID})
+		if err != nil {
+			status, code := mapTradeError(err)
+			c.JSON(status, gin.H{"error": gin.H{"code": code, "message": err.Error()}})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"items": items, "count": len(items)})
+	}
+}
+
+func GetPnLReportHandler(svc *trade.Service) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		var (
+			from time.Time
+			to   time.Time
+			err  error
+		)
+		if raw := strings.TrimSpace(c.Query("from")); raw != "" {
+			from, err = time.Parse("2006-01-02", raw)
+			if err != nil {
+				c.JSON(http.StatusBadRequest, gin.H{
+					"error": gin.H{"code": "BAD_REQUEST", "message": "invalid from query parameter, expected YYYY-MM-DD"},
+				})
+				return
+			}
+		}
+		if raw := strings.TrimSpace(c.Query("to")); raw != "" {
+			to, err = time.Parse("2006-01-02", raw)
+			if err != nil {
+				c.JSON(http.StatusBadRequest, gin.H{
+					"error": gin.H{"code": "BAD_REQUEST", "message": "invalid to query parameter, expected YYYY-MM-DD"},
+				})
+				return
+			}
+		}
+
+		report, err := svc.GetPnLReport(c.Request.Context(), trade.PnLReportOptions{
+			From: from,
+			To:   to,
+		})
+		if err != nil {
+			status, code := mapTradeError(err)
+			c.JSON(status, gin.H{"error": gin.H{"code": code, "message": err.Error()}})
+			return
+		}
+		c.JSON(http.StatusOK, report)
 	}
 }
 

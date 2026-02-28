@@ -178,6 +178,123 @@ func TestListTradesWithFilters(t *testing.T) {
 	}
 }
 
+func TestListPositions(t *testing.T) {
+	db := setupTradeTestDB(t)
+	seedTradeFixtures(t, db)
+
+	now := time.Now().UTC()
+	if err := db.Exec(
+		"INSERT INTO trades(market_id, order_id, side, outcome, price, size, cost_usdc, status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+		"market-1", "oid-b1", "BUY", "YES", "0.60", "10.00", "6.00", "filled", now,
+	).Error; err != nil {
+		t.Fatalf("insert trade buy: %v", err)
+	}
+	if err := db.Exec(
+		"INSERT INTO trades(market_id, order_id, side, outcome, price, size, cost_usdc, status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+		"market-1", "oid-s1", "SELL", "YES", "0.70", "4.00", "2.80", "filled", now.Add(1*time.Minute),
+	).Error; err != nil {
+		t.Fatalf("insert trade sell: %v", err)
+	}
+	if err := db.Exec(
+		"INSERT INTO trades(market_id, order_id, side, outcome, price, size, cost_usdc, status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+		"market-2", "oid-b2", "BUY", "NO", "0.40", "5.00", "2.00", "filled", now.Add(2*time.Minute),
+	).Error; err != nil {
+		t.Fatalf("insert trade market2: %v", err)
+	}
+	if err := db.Exec(
+		"INSERT INTO market_prices(market_id, price_yes, price_no, captured_at) VALUES (?, ?, ?, ?)",
+		"market-1", "0.65", "0.35", now.Add(3*time.Minute),
+	).Error; err != nil {
+		t.Fatalf("insert market price 1: %v", err)
+	}
+	if err := db.Exec(
+		"INSERT INTO market_prices(market_id, price_yes, price_no, captured_at) VALUES (?, ?, ?, ?)",
+		"market-2", "0.55", "0.45", now.Add(3*time.Minute),
+	).Error; err != nil {
+		t.Fatalf("insert market price 2: %v", err)
+	}
+
+	svc := newTradeServiceForTest(db, "http://127.0.0.1:1")
+	items, err := svc.ListPositions(context.Background(), ListPositionsOptions{MarketID: "market-1"})
+	if err != nil {
+		t.Fatalf("list positions: %v", err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("expected 1 position, got %d", len(items))
+	}
+	if items[0].MarketID != "market-1" || items[0].Outcome != "YES" {
+		t.Fatalf("unexpected position: %+v", items[0])
+	}
+	if items[0].NetSize != 6 {
+		t.Fatalf("expected net size 6, got %.4f", items[0].NetSize)
+	}
+	if items[0].MarkPrice == nil || *items[0].MarkPrice <= 0 {
+		t.Fatalf("expected mark price")
+	}
+}
+
+func TestGetPnLReport(t *testing.T) {
+	db := setupTradeTestDB(t)
+	seedTradeFixtures(t, db)
+
+	base := time.Date(2026, 2, 20, 12, 0, 0, 0, time.UTC)
+	inserts := []struct {
+		OrderID   string
+		Status    string
+		CostUSDC  string
+		PnLUSDC   *string
+		CreatedAt time.Time
+	}{
+		{OrderID: "oid-1", Status: "filled", CostUSDC: "10.00", PnLUSDC: ptrString("1.20"), CreatedAt: base},
+		{OrderID: "oid-2", Status: "closed", CostUSDC: "8.00", PnLUSDC: ptrString("-0.80"), CreatedAt: base.Add(2 * time.Hour)},
+		{OrderID: "oid-3", Status: "placed", CostUSDC: "2.00", PnLUSDC: nil, CreatedAt: base.Add(4 * time.Hour)},
+	}
+	for _, it := range inserts {
+		if it.PnLUSDC == nil {
+			if err := db.Exec(
+				"INSERT INTO trades(market_id, order_id, side, outcome, price, size, cost_usdc, status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+				"market-1", it.OrderID, "BUY", "YES", "0.50", "1.00", it.CostUSDC, it.Status, it.CreatedAt,
+			).Error; err != nil {
+				t.Fatalf("insert trade: %v", err)
+			}
+			continue
+		}
+		if err := db.Exec(
+			"INSERT INTO trades(market_id, order_id, side, outcome, price, size, cost_usdc, status, pnl_usdc, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+			"market-1", it.OrderID, "BUY", "YES", "0.50", "1.00", it.CostUSDC, it.Status, *it.PnLUSDC, it.CreatedAt,
+		).Error; err != nil {
+			t.Fatalf("insert trade with pnl: %v", err)
+		}
+	}
+
+	svc := newTradeServiceForTest(db, "http://127.0.0.1:1")
+	report, err := svc.GetPnLReport(context.Background(), PnLReportOptions{
+		From: base.Add(-24 * time.Hour),
+		To:   base.Add(24 * time.Hour),
+	})
+	if err != nil {
+		t.Fatalf("pnl report: %v", err)
+	}
+	if report.TotalTrades != 3 {
+		t.Fatalf("expected total trades=3, got %d", report.TotalTrades)
+	}
+	if report.FilledTrades != 2 {
+		t.Fatalf("expected filled trades=2, got %d", report.FilledTrades)
+	}
+	if report.WinTrades != 1 || report.LossTrades != 1 {
+		t.Fatalf("unexpected win/loss: %+v", report)
+	}
+	if report.RealizedPnLUSDC < 0.39 || report.RealizedPnLUSDC > 0.41 {
+		t.Fatalf("expected realized pnl around 0.40, got %.4f", report.RealizedPnLUSDC)
+	}
+	if report.OpenExposureUSDC < 1.99 || report.OpenExposureUSDC > 2.01 {
+		t.Fatalf("expected open exposure around 2.00, got %.4f", report.OpenExposureUSDC)
+	}
+	if len(report.Daily) == 0 {
+		t.Fatalf("expected daily pnl rows")
+	}
+}
+
 func setupTradeTestDB(t *testing.T) *gorm.DB {
 	t.Helper()
 	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{
@@ -226,6 +343,13 @@ func setupTradeTestDB(t *testing.T) *gorm.DB {
 			executed_at DATETIME,
 			created_at DATETIME
 		)`,
+		`CREATE TABLE market_prices (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			market_id TEXT,
+			price_yes DECIMAL(10,4),
+			price_no DECIMAL(10,4),
+			captured_at DATETIME
+		)`,
 	}
 	for _, ddl := range ddls {
 		if err := db.Exec(ddl).Error; err != nil {
@@ -233,6 +357,10 @@ func setupTradeTestDB(t *testing.T) *gorm.DB {
 		}
 	}
 	return db
+}
+
+func ptrString(v string) *string {
+	return &v
 }
 
 func seedTradeFixtures(t *testing.T, db *gorm.DB) {

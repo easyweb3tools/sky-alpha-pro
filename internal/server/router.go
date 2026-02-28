@@ -41,6 +41,8 @@ func NewRouter(cfg *config.Config, log *zap.Logger, db *gorm.DB) http.Handler {
 		api.GET("/trades/:id", GetTradeHandler(tradeSvc))
 		api.POST("/trades", CreateTradeHandler(tradeSvc))
 		api.DELETE("/trades/:id", CancelTradeHandler(tradeSvc))
+		api.GET("/positions", ListPositionsHandler(tradeSvc))
+		api.GET("/pnl", GetPnLReportHandler(tradeSvc))
 		api.POST("/agent/analyze", AnalyzeAgentHandler(agentSvc))
 		api.GET("/agent/signals", ListSignalsHandler(signalSvc))
 		api.GET("/agent/signals/:id", GetAgentSignalHandler(signalSvc))

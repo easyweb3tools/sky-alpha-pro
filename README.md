@@ -55,6 +55,13 @@ Week 7 delivery:
 - trade APIs: `POST /api/v1/trades`, `DELETE /api/v1/trades/:id`, `GET /api/v1/trades`, `GET /api/v1/trades/:id`
 - trade CLI: `trade buy`, `trade sell`, `trade cancel`, `trade list`
 
+Week 8 delivery:
+
+- position tracking API: `GET /api/v1/positions`
+- PnL report API: `GET /api/v1/pnl`
+- trade CLI: `trade positions`, `trade pnl`
+- trade list API/CLI supports `status` + `market_id` filters
+
 ## MVP Database Rule
 
 MVP 阶段数据库表结构统一由 GORM `AutoMigrate` 管理：
@@ -196,6 +203,8 @@ go run ./cmd/sky-alpha-pro trade buy <market_id> --outcome YES --price 0.65 --si
 go run ./cmd/sky-alpha-pro trade sell <market_id> --outcome NO --price 0.42 --size 8 --confirm
 go run ./cmd/sky-alpha-pro trade cancel <trade_id>
 go run ./cmd/sky-alpha-pro trade list --limit 20 --status placed --market-id <market_id>
+go run ./cmd/sky-alpha-pro trade positions --market-id <market_id>
+go run ./cmd/sky-alpha-pro trade pnl --from 2026-02-01 --to 2026-02-28
 ```
 
 REST API:
@@ -207,6 +216,8 @@ curl -X POST http://127.0.0.1:8080/api/v1/trades \
 curl "http://127.0.0.1:8080/api/v1/trades?limit=20&status=placed&market_id=<market_id>"
 curl "http://127.0.0.1:8080/api/v1/trades/1"
 curl -X DELETE "http://127.0.0.1:8080/api/v1/trades/1"
+curl "http://127.0.0.1:8080/api/v1/positions?market_id=<market_id>"
+curl "http://127.0.0.1:8080/api/v1/pnl?from=2026-02-01&to=2026-02-28"
 ```
 
 Required config:

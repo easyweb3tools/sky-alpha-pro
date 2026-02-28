@@ -41,6 +41,48 @@ type ListTradesOptions struct {
 	MarketID string
 }
 
+type ListPositionsOptions struct {
+	MarketID string
+}
+
+type PositionView struct {
+	MarketID       string    `json:"market_id"`
+	Outcome        string    `json:"outcome"`
+	NetSize        float64   `json:"net_size"`
+	AvgEntryPrice  float64   `json:"avg_entry_price"`
+	MarkPrice      *float64  `json:"mark_price,omitempty"`
+	MarketValueUSD *float64  `json:"market_value_usd,omitempty"`
+	UnrealizedPnL  *float64  `json:"unrealized_pnl,omitempty"`
+	RealizedPnL    float64   `json:"realized_pnl"`
+	UpdatedAt      time.Time `json:"updated_at"`
+}
+
+type PnLReportOptions struct {
+	From time.Time
+	To   time.Time
+}
+
+type DailyPnL struct {
+	Date         string  `json:"date"`
+	RealizedPnL  float64 `json:"realized_pnl"`
+	GrossVolume  float64 `json:"gross_volume"`
+	FilledTrades int64   `json:"filled_trades"`
+}
+
+type PnLReport struct {
+	From             time.Time  `json:"from"`
+	To               time.Time  `json:"to"`
+	TotalTrades      int64      `json:"total_trades"`
+	FilledTrades     int64      `json:"filled_trades"`
+	WinTrades        int64      `json:"win_trades"`
+	LossTrades       int64      `json:"loss_trades"`
+	WinRate          float64    `json:"win_rate"`
+	GrossVolumeUSDC  float64    `json:"gross_volume_usdc"`
+	RealizedPnLUSDC  float64    `json:"realized_pnl_usdc"`
+	OpenExposureUSDC float64    `json:"open_exposure_usdc"`
+	Daily            []DailyPnL `json:"daily"`
+}
+
 type TradeView struct {
 	ID         uint64     `json:"id"`
 	MarketID   string     `json:"market_id"`

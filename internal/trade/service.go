@@ -256,6 +256,259 @@ func (s *Service) GetTradeByID(ctx context.Context, tradeID uint64) (*TradeView,
 	return &item, nil
 }
 
+func (s *Service) ListPositions(ctx context.Context, opts ListPositionsOptions) ([]PositionView, error) {
+	type tradeRow struct {
+		MarketID  string              `gorm:"column:market_id"`
+		Outcome   string              `gorm:"column:outcome"`
+		Side      string              `gorm:"column:side"`
+		Price     decimal.Decimal     `gorm:"column:price"`
+		Size      decimal.Decimal     `gorm:"column:size"`
+		FillPrice decimal.NullDecimal `gorm:"column:fill_price"`
+		FillSize  decimal.NullDecimal `gorm:"column:fill_size"`
+		UpdatedAt time.Time           `gorm:"column:created_at"`
+	}
+	type priceRow struct {
+		MarketID string          `gorm:"column:market_id"`
+		PriceYes decimal.Decimal `gorm:"column:price_yes"`
+		PriceNo  decimal.Decimal `gorm:"column:price_no"`
+	}
+	type pnlRow struct {
+		MarketID string              `gorm:"column:market_id"`
+		Outcome  string              `gorm:"column:outcome"`
+		PnLUSDC  decimal.NullDecimal `gorm:"column:pnl_usdc"`
+	}
+	type positionAgg struct {
+		MarketID      string
+		Outcome       string
+		NetSize       decimal.Decimal
+		NetCost       decimal.Decimal
+		LatestUpdated time.Time
+	}
+
+	query := s.db.WithContext(ctx).
+		Table("trades").
+		Select("market_id, outcome, side, price, size, fill_price, fill_size, created_at").
+		Where("status IN ?", []string{"filled", "partially_filled"})
+	if marketID := strings.TrimSpace(opts.MarketID); marketID != "" {
+		query = query.Where("market_id = ?", marketID)
+	}
+
+	var rows []tradeRow
+	if err := query.Scan(&rows).Error; err != nil {
+		return nil, err
+	}
+
+	aggs := make(map[string]*positionAgg)
+	for _, row := range rows {
+		qty := row.Size
+		if row.FillSize.Valid && row.FillSize.Decimal.GreaterThan(decimal.Zero) {
+			qty = row.FillSize.Decimal
+		}
+		execPrice := row.Price
+		if row.FillPrice.Valid && row.FillPrice.Decimal.GreaterThan(decimal.Zero) {
+			execPrice = row.FillPrice.Decimal
+		}
+		if qty.LessThanOrEqual(decimal.Zero) || execPrice.LessThanOrEqual(decimal.Zero) {
+			continue
+		}
+
+		sign := decimal.NewFromInt(1)
+		if strings.EqualFold(row.Side, orderSideSell) {
+			sign = decimal.NewFromInt(-1)
+		}
+		key := row.MarketID + "|" + strings.ToUpper(row.Outcome)
+		agg := aggs[key]
+		if agg == nil {
+			agg = &positionAgg{
+				MarketID: row.MarketID,
+				Outcome:  strings.ToUpper(row.Outcome),
+			}
+			aggs[key] = agg
+		}
+		agg.NetSize = agg.NetSize.Add(qty.Mul(sign))
+		agg.NetCost = agg.NetCost.Add(qty.Mul(execPrice).Mul(sign))
+		if row.UpdatedAt.After(agg.LatestUpdated) {
+			agg.LatestUpdated = row.UpdatedAt
+		}
+	}
+
+	priceMap := make(map[string]priceRow)
+	sub := s.db.WithContext(ctx).
+		Table("market_prices").
+		Select("market_id, MAX(captured_at) AS max_captured_at").
+		Group("market_id")
+	var latestPrices []priceRow
+	if err := s.db.WithContext(ctx).
+		Table("market_prices mp").
+		Select("mp.market_id, mp.price_yes, mp.price_no").
+		Joins("JOIN (?) latest ON mp.market_id = latest.market_id AND mp.captured_at = latest.max_captured_at", sub).
+		Scan(&latestPrices).Error; err == nil {
+		for _, row := range latestPrices {
+			priceMap[row.MarketID] = row
+		}
+	}
+
+	realizedByKey := make(map[string]decimal.Decimal)
+	pnlQuery := s.db.WithContext(ctx).
+		Table("trades").
+		Select("market_id, outcome, pnl_usdc").
+		Where("pnl_usdc IS NOT NULL")
+	if marketID := strings.TrimSpace(opts.MarketID); marketID != "" {
+		pnlQuery = pnlQuery.Where("market_id = ?", marketID)
+	}
+	var pnlRows []pnlRow
+	if err := pnlQuery.Scan(&pnlRows).Error; err == nil {
+		for _, row := range pnlRows {
+			if !row.PnLUSDC.Valid {
+				continue
+			}
+			key := row.MarketID + "|" + strings.ToUpper(row.Outcome)
+			realizedByKey[key] = realizedByKey[key].Add(row.PnLUSDC.Decimal)
+		}
+	}
+
+	positions := make([]PositionView, 0, len(aggs))
+	for key, agg := range aggs {
+		if agg.NetSize.IsZero() {
+			continue
+		}
+		absSize := agg.NetSize.Abs()
+		avgEntry := decimal.Zero
+		if !absSize.IsZero() {
+			avgEntry = agg.NetCost.Abs().Div(absSize)
+		}
+		item := PositionView{
+			MarketID:      agg.MarketID,
+			Outcome:       agg.Outcome,
+			NetSize:       agg.NetSize.InexactFloat64(),
+			AvgEntryPrice: avgEntry.InexactFloat64(),
+			RealizedPnL:   realizedByKey[key].InexactFloat64(),
+			UpdatedAt:     agg.LatestUpdated,
+		}
+
+		if mp, ok := priceMap[agg.MarketID]; ok {
+			mark := mp.PriceNo
+			if strings.EqualFold(agg.Outcome, outcomeYes) {
+				mark = mp.PriceYes
+			}
+			if mark.GreaterThan(decimal.Zero) {
+				v := mark.InexactFloat64()
+				item.MarkPrice = &v
+				mv := agg.NetSize.Mul(mark).InexactFloat64()
+				item.MarketValueUSD = &mv
+				upnl := agg.NetSize.Mul(mark).Sub(agg.NetCost).InexactFloat64()
+				item.UnrealizedPnL = &upnl
+			}
+		}
+		positions = append(positions, item)
+	}
+	return positions, nil
+}
+
+func (s *Service) GetPnLReport(ctx context.Context, opts PnLReportOptions) (*PnLReport, error) {
+	from := opts.From.UTC()
+	to := opts.To.UTC()
+	if from.IsZero() {
+		from = time.Now().UTC().AddDate(0, 0, -7)
+	}
+	if to.IsZero() {
+		to = time.Now().UTC()
+	}
+	from = time.Date(from.Year(), from.Month(), from.Day(), 0, 0, 0, 0, time.UTC)
+	to = time.Date(to.Year(), to.Month(), to.Day(), 23, 59, 59, int(time.Second-time.Nanosecond), time.UTC)
+	if to.Before(from) {
+		return nil, fmt.Errorf("%w: to must be after from", ErrTradeInvalidRequest)
+	}
+
+	type row struct {
+		Status   string              `gorm:"column:status"`
+		CostUSDC decimal.Decimal     `gorm:"column:cost_usdc"`
+		PnLUSDC  decimal.NullDecimal `gorm:"column:pnl_usdc"`
+	}
+	var rows []row
+	if err := s.db.WithContext(ctx).
+		Table("trades").
+		Select("status, cost_usdc, pnl_usdc").
+		Where("created_at >= ? AND created_at <= ?", from, to).
+		Scan(&rows).Error; err != nil {
+		return nil, err
+	}
+
+	report := &PnLReport{
+		From:  from,
+		To:    to,
+		Daily: make([]DailyPnL, 0, 16),
+	}
+	report.TotalTrades = int64(len(rows))
+
+	grossVolume := decimal.Zero
+	realized := decimal.Zero
+	openExposure := decimal.Zero
+
+	for _, row := range rows {
+		grossVolume = grossVolume.Add(row.CostUSDC.Abs())
+		status := normalizeTradeStatus(row.Status)
+		if status == "filled" || status == "closed" {
+			report.FilledTrades++
+		}
+		if status == "pending" || status == "placed" || status == "partially_filled" {
+			openExposure = openExposure.Add(row.CostUSDC.Abs())
+		}
+		if row.PnLUSDC.Valid {
+			realized = realized.Add(row.PnLUSDC.Decimal)
+			switch row.PnLUSDC.Decimal.Cmp(decimal.Zero) {
+			case 1:
+				report.WinTrades++
+			case -1:
+				report.LossTrades++
+			}
+		}
+	}
+	report.GrossVolumeUSDC = grossVolume.InexactFloat64()
+	report.RealizedPnLUSDC = realized.InexactFloat64()
+	report.OpenExposureUSDC = openExposure.InexactFloat64()
+	decisions := report.WinTrades + report.LossTrades
+	if decisions > 0 {
+		report.WinRate = float64(report.WinTrades) / float64(decisions) * 100
+	}
+
+	type dailyRow struct {
+		Date        string              `gorm:"column:date"`
+		RealizedPnL decimal.NullDecimal `gorm:"column:realized_pnl"`
+		GrossVolume decimal.NullDecimal `gorm:"column:gross_volume"`
+		FilledCnt   int64               `gorm:"column:filled_trades"`
+	}
+	var dailyRows []dailyRow
+	if err := s.db.WithContext(ctx).
+		Table("trades").
+		Select(
+			"DATE(created_at) AS date, "+
+				"COALESCE(SUM(pnl_usdc), 0) AS realized_pnl, "+
+				"COALESCE(SUM(cost_usdc), 0) AS gross_volume, "+
+				"SUM(CASE WHEN status IN ('filled','closed') THEN 1 ELSE 0 END) AS filled_trades",
+		).
+		Where("created_at >= ? AND created_at <= ?", from, to).
+		Group("DATE(created_at)").
+		Order("DATE(created_at) ASC").
+		Scan(&dailyRows).Error; err == nil {
+		for _, row := range dailyRows {
+			item := DailyPnL{
+				Date:         row.Date,
+				FilledTrades: row.FilledCnt,
+			}
+			if row.RealizedPnL.Valid {
+				item.RealizedPnL = row.RealizedPnL.Decimal.InexactFloat64()
+			}
+			if row.GrossVolume.Valid {
+				item.GrossVolume = row.GrossVolume.Decimal.InexactFloat64()
+			}
+			report.Daily = append(report.Daily, item)
+		}
+	}
+
+	return report, nil
+}
+
 func (s *Service) validateRisk(ctx context.Context, market *model.Market, req SubmitOrderRequest) error {
 	cost := req.Price * req.Size
 	if s.cfg.MaxPositionSize > 0 && cost > s.cfg.MaxPositionSize {
