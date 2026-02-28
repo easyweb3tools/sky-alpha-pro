@@ -447,6 +447,7 @@ func setupTradeTestDB(t *testing.T) *gorm.DB {
 			fill_size DECIMAL(18,6),
 			pnl_usdc DECIMAL(18,6),
 			tx_hash TEXT,
+			is_paper BOOLEAN DEFAULT FALSE,
 			executed_at DATETIME,
 			created_at DATETIME
 		)`,
@@ -517,4 +518,178 @@ func newTradeServiceForTest(db *gorm.DB, clobURL string) *Service {
 		CLOBBaseURL:    clobURL,
 		RequestTimeout: 5 * time.Second,
 	}, db, zap.NewNop(), signalSvc)
+}
+
+func newPaperTradeServiceForTest(db *gorm.DB) *Service {
+	signalSvc := signal.NewService(config.SignalConfig{
+		MinEdgePct:          1,
+		MaxMarkets:          10,
+		DefaultLimit:        10,
+		Concurrency:         2,
+		ForecastMaxAgeHours: 24,
+		MinSigma:            0.5,
+	}, db, zap.NewNop())
+
+	return NewService(config.TradeConfig{
+		ChainID:              137,
+		MaxOrderSize:         0,
+		MaxPositionSize:      100,
+		MaxDailyLoss:         50,
+		MinEdgePct:           5,
+		MaxOpenPositions:     10,
+		MinLiquidity:         1000,
+		ConfirmationRequired: false,
+		PaperMode:            true,
+	}, config.MarketConfig{
+		CLOBBaseURL:    "http://127.0.0.1:1",
+		RequestTimeout: 5 * time.Second,
+	}, db, zap.NewNop(), signalSvc)
+}
+
+func TestSubmitPaperOrder(t *testing.T) {
+	db := setupTradeTestDB(t)
+	seedTradeFixtures(t, db)
+
+	svc := newPaperTradeServiceForTest(db)
+
+	result, err := svc.SubmitOrder(context.Background(), SubmitOrderRequest{
+		MarketRef: "market-1",
+		Side:      "BUY",
+		Outcome:   "YES",
+		Price:     0.62,
+		Size:      10,
+		Confirm:   true,
+	})
+	if err != nil {
+		t.Fatalf("submit paper order: %v", err)
+	}
+	if result.TradeID == 0 {
+		t.Fatalf("expected trade id")
+	}
+	if result.OrderID == "" || result.OrderID[:6] != "paper-" {
+		t.Fatalf("expected paper order id, got: %s", result.OrderID)
+	}
+	if result.Status != "filled" {
+		t.Fatalf("expected filled status, got: %s", result.Status)
+	}
+
+	// Verify the trade has is_paper=true in DB
+	var trade struct {
+		IsPaper bool `gorm:"column:is_paper"`
+		Status  string
+	}
+	if err := db.Table("trades").Where("id = ?", result.TradeID).Scan(&trade).Error; err != nil {
+		t.Fatalf("scan trade: %v", err)
+	}
+	if !trade.IsPaper {
+		t.Fatalf("expected is_paper=true")
+	}
+	if trade.Status != "filled" {
+		t.Fatalf("expected filled, got: %s", trade.Status)
+	}
+}
+
+func TestListTradesPaperFilter(t *testing.T) {
+	db := setupTradeTestDB(t)
+	seedTradeFixtures(t, db)
+	now := time.Now().UTC()
+
+	// Insert a live trade
+	if err := db.Exec(
+		"INSERT INTO trades(market_id, order_id, side, outcome, price, size, cost_usdc, status, is_paper, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+		"market-1", "oid-live-1", "BUY", "YES", "0.50", "1.00", "0.50", "filled", false, now,
+	).Error; err != nil {
+		t.Fatalf("insert live trade: %v", err)
+	}
+	// Insert a paper trade
+	if err := db.Exec(
+		"INSERT INTO trades(market_id, order_id, side, outcome, price, size, cost_usdc, status, is_paper, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+		"market-1", "paper-1", "BUY", "YES", "0.60", "2.00", "1.20", "filled", true, now.Add(1*time.Minute),
+	).Error; err != nil {
+		t.Fatalf("insert paper trade: %v", err)
+	}
+
+	svc := newPaperTradeServiceForTest(db)
+
+	// Filter paper=true
+	paperTrue := true
+	items, err := svc.ListTrades(context.Background(), ListTradesOptions{Limit: 10, IsPaper: &paperTrue})
+	if err != nil {
+		t.Fatalf("list paper trades: %v", err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("expected 1 paper trade, got %d", len(items))
+	}
+	if items[0].OrderID != "paper-1" {
+		t.Fatalf("expected paper-1, got: %s", items[0].OrderID)
+	}
+
+	// Filter paper=false
+	paperFalse := false
+	items, err = svc.ListTrades(context.Background(), ListTradesOptions{Limit: 10, IsPaper: &paperFalse})
+	if err != nil {
+		t.Fatalf("list live trades: %v", err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("expected 1 live trade, got %d", len(items))
+	}
+	if items[0].OrderID != "oid-live-1" {
+		t.Fatalf("expected oid-live-1, got: %s", items[0].OrderID)
+	}
+
+	// No filter -> both
+	items, err = svc.ListTrades(context.Background(), ListTradesOptions{Limit: 10})
+	if err != nil {
+		t.Fatalf("list all trades: %v", err)
+	}
+	if len(items) != 2 {
+		t.Fatalf("expected 2 trades, got %d", len(items))
+	}
+}
+
+func TestPositionsPaperFilter(t *testing.T) {
+	db := setupTradeTestDB(t)
+	seedTradeFixtures(t, db)
+	now := time.Now().UTC()
+
+	// Insert paper trade
+	if err := db.Exec(
+		"INSERT INTO trades(market_id, order_id, side, outcome, price, size, cost_usdc, status, is_paper, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+		"market-1", "paper-pos-1", "BUY", "YES", "0.60", "10.00", "6.00", "filled", true, now,
+	).Error; err != nil {
+		t.Fatalf("insert paper trade: %v", err)
+	}
+	// Insert live trade
+	if err := db.Exec(
+		"INSERT INTO trades(market_id, order_id, side, outcome, price, size, cost_usdc, status, is_paper, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+		"market-2", "oid-live-pos-1", "BUY", "NO", "0.40", "5.00", "2.00", "filled", false, now,
+	).Error; err != nil {
+		t.Fatalf("insert live trade: %v", err)
+	}
+
+	svc := newPaperTradeServiceForTest(db)
+
+	paperTrue := true
+	items, err := svc.ListPositions(context.Background(), ListPositionsOptions{IsPaper: &paperTrue})
+	if err != nil {
+		t.Fatalf("list paper positions: %v", err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("expected 1 paper position, got %d", len(items))
+	}
+	if items[0].MarketID != "market-1" {
+		t.Fatalf("expected market-1, got: %s", items[0].MarketID)
+	}
+
+	paperFalse := false
+	items, err = svc.ListPositions(context.Background(), ListPositionsOptions{IsPaper: &paperFalse})
+	if err != nil {
+		t.Fatalf("list live positions: %v", err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("expected 1 live position, got %d", len(items))
+	}
+	if items[0].MarketID != "market-2" {
+		t.Fatalf("expected market-2, got: %s", items[0].MarketID)
+	}
 }

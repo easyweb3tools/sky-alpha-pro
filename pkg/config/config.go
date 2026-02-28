@@ -18,6 +18,7 @@ type Config struct {
 	Agent    AgentConfig    `mapstructure:"agent"`
 	Trade    TradeConfig    `mapstructure:"trade"`
 	Chain    ChainConfig    `mapstructure:"chain"`
+	Sim      SimConfig      `mapstructure:"sim"`
 	Database DatabaseConfig `mapstructure:"database"`
 	Log      LogConfig      `mapstructure:"log"`
 }
@@ -100,6 +101,15 @@ type TradeConfig struct {
 	MaxOpenPositions     int     `mapstructure:"max_open_positions"`
 	MinLiquidity         float64 `mapstructure:"min_liquidity"`
 	ConfirmationRequired bool    `mapstructure:"confirmation_required"`
+	PaperMode            bool    `mapstructure:"paper_mode"`
+}
+
+type SimConfig struct {
+	Interval     time.Duration `mapstructure:"interval"`
+	OrderSize    float64       `mapstructure:"order_size"`
+	MinEdgePct   float64       `mapstructure:"min_edge_pct"`
+	MaxPositions int           `mapstructure:"max_positions"`
+	AutoSettle   bool          `mapstructure:"auto_settle"`
 }
 
 type ChainConfig struct {
@@ -205,6 +215,13 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("trade.max_open_positions", 10)
 	v.SetDefault("trade.min_liquidity", 1000.0)
 	v.SetDefault("trade.confirmation_required", true)
+	v.SetDefault("trade.paper_mode", false)
+
+	v.SetDefault("sim.interval", "5m")
+	v.SetDefault("sim.order_size", 1.0)
+	v.SetDefault("sim.min_edge_pct", 5.0)
+	v.SetDefault("sim.max_positions", 20)
+	v.SetDefault("sim.auto_settle", true)
 
 	v.SetDefault("chain.rpc_url", "")
 	v.SetDefault("chain.chain_id", 137)
