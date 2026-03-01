@@ -1,15 +1,17 @@
 package scheduler
 
 import (
+	"context"
 	"testing"
 	"time"
 
 	"go.uber.org/zap"
 
+	"sky-alpha-pro/internal/chain"
 	"sky-alpha-pro/pkg/config"
 )
 
-func TestRegisterDefaultJobsSkipsChainScanWhenRPCEmpty(t *testing.T) {
+func TestRegisterDefaultJobsRegistersChainScanWithSkipFallbackWhenRPCEmpty(t *testing.T) {
 	cfg := &config.Config{}
 	cfg.Scheduler.Enabled = true
 	cfg.Scheduler.DefaultTimeout = time.Second
@@ -19,10 +21,24 @@ func TestRegisterDefaultJobsSkipsChainScanWhenRPCEmpty(t *testing.T) {
 	cfg.Chain.RPCURL = ""
 
 	mgr := NewManager(cfg.Scheduler, zap.NewNop(), nil)
-	RegisterDefaultJobs(mgr, cfg, nil, nil, nil, nil, nil, zap.NewNop())
+	RegisterDefaultJobs(mgr, cfg, nil, nil, nil, &chain.Service{}, nil, zap.NewNop())
+	found := false
 	for _, job := range mgr.jobs {
 		if job.name == "chain_scan" {
-			t.Fatalf("chain_scan should not be registered when rpc url is empty")
+			found = true
+			result, err := job.run(context.Background())
+			if err != nil {
+				t.Fatalf("chain_scan run should skip without error when rpc empty: %v", err)
+			}
+			if result.SkipReason == "" {
+				t.Fatalf("expected chain_scan skip reason when rpc empty")
+			}
+			if len(result.Errors) == 0 || result.Errors[0].Code != errCodeChainRPCEmpty {
+				t.Fatalf("expected chain_rpc_empty issue, got %+v", result.Errors)
+			}
 		}
+	}
+	if !found {
+		t.Fatalf("chain_scan should be registered")
 	}
 }

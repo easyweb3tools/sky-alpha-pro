@@ -3,6 +3,7 @@ package metrics
 import (
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -19,12 +20,17 @@ type Registry struct {
 
 	jobRunsTotal            *prometheus.CounterVec
 	jobDurationSeconds      *prometheus.HistogramVec
+	jobErrorsTotal          *prometheus.CounterVec
 	jobInflight             *prometheus.GaugeVec
 	jobLastSuccessTimestamp *prometheus.GaugeVec
 	jobLastErrorTimestamp   *prometheus.GaugeVec
 	jobNextRunTimestamp     *prometheus.GaugeVec
+	jobConsecutiveFailures  *prometheus.GaugeVec
 	fetchRecordsTotal       *prometheus.CounterVec
 	dataFreshnessSeconds    *prometheus.GaugeVec
+
+	cacheMu               sync.RWMutex
+	dataFreshnessSnapshot map[string]float64
 }
 
 func New(cfg config.MetricsConfig) *Registry {
@@ -53,6 +59,12 @@ func New(cfg config.MetricsConfig) *Registry {
 			Help:      "Scheduler job run duration in seconds grouped by status.",
 			Buckets:   []float64{0.05, 0.1, 0.25, 0.5, 1, 2, 5, 10, 20, 30, 60, 120},
 		}, []string{"job", "status"}),
+		jobErrorsTotal: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Namespace: "sky_alpha",
+			Subsystem: "scheduler",
+			Name:      "job_errors_total",
+			Help:      "Structured scheduler job errors grouped by error_code.",
+		}, []string{"job", "error_code"}),
 		jobInflight: prometheus.NewGaugeVec(prometheus.GaugeOpts{
 			Namespace: "sky_alpha",
 			Subsystem: "scheduler",
@@ -77,6 +89,12 @@ func New(cfg config.MetricsConfig) *Registry {
 			Name:      "job_next_run_timestamp_seconds",
 			Help:      "Unix timestamp of the next scheduled run for each scheduler job.",
 		}, []string{"job"}),
+		jobConsecutiveFailures: prometheus.NewGaugeVec(prometheus.GaugeOpts{
+			Namespace: "sky_alpha",
+			Subsystem: "scheduler",
+			Name:      "job_consecutive_failures",
+			Help:      "Consecutive failure count for each scheduler job.",
+		}, []string{"job"}),
 		fetchRecordsTotal: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Namespace: "sky_alpha",
 			Subsystem: "fetch",
@@ -89,6 +107,7 @@ func New(cfg config.MetricsConfig) *Registry {
 			Name:      "freshness_seconds",
 			Help:      "Dataset freshness in seconds.",
 		}, []string{"dataset"}),
+		dataFreshnessSnapshot: make(map[string]float64),
 	}
 
 	r.reg.MustRegister(
@@ -96,10 +115,12 @@ func New(cfg config.MetricsConfig) *Registry {
 		collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}),
 		r.jobRunsTotal,
 		r.jobDurationSeconds,
+		r.jobErrorsTotal,
 		r.jobInflight,
 		r.jobLastSuccessTimestamp,
 		r.jobLastErrorTimestamp,
 		r.jobNextRunTimestamp,
+		r.jobConsecutiveFailures,
 		r.fetchRecordsTotal,
 		r.dataFreshnessSeconds,
 	)
@@ -164,6 +185,24 @@ func (r *Registry) SetJobNextRun(job string, at time.Time) {
 	r.jobNextRunTimestamp.WithLabelValues(job).Set(float64(at.Unix()))
 }
 
+func (r *Registry) SetJobConsecutiveFailures(job string, n float64) {
+	if !r.Enabled() {
+		return
+	}
+	r.jobConsecutiveFailures.WithLabelValues(job).Set(n)
+}
+
+func (r *Registry) AddJobError(job, errorCode string, n int) {
+	if !r.Enabled() || n <= 0 {
+		return
+	}
+	code := strings.TrimSpace(errorCode)
+	if code == "" {
+		code = "unknown_error"
+	}
+	r.jobErrorsTotal.WithLabelValues(job, code).Add(float64(n))
+}
+
 func (r *Registry) AddFetchRecords(job, entity, result string, n int) {
 	if !r.Enabled() || n <= 0 {
 		return
@@ -176,4 +215,20 @@ func (r *Registry) SetDataFreshness(dataset string, seconds float64) {
 		return
 	}
 	r.dataFreshnessSeconds.WithLabelValues(dataset).Set(seconds)
+	r.cacheMu.Lock()
+	r.dataFreshnessSnapshot[dataset] = seconds
+	r.cacheMu.Unlock()
+}
+
+func (r *Registry) SnapshotDataFreshness() map[string]float64 {
+	out := make(map[string]float64)
+	if r == nil {
+		return out
+	}
+	r.cacheMu.RLock()
+	defer r.cacheMu.RUnlock()
+	for k, v := range r.dataFreshnessSnapshot {
+		out[k] = v
+	}
+	return out
 }

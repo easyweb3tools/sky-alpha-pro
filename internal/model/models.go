@@ -209,3 +209,19 @@ type AgentLog struct {
 	DurationMS       int            `gorm:"column:duration_ms"`
 	CreatedAt        time.Time      `gorm:"column:created_at;not null;index:idx_agent_logs_session,priority:2;index:idx_agent_logs_market,sort:desc,priority:2"`
 }
+
+type SchedulerRun struct {
+	ID             uint64         `gorm:"column:id;primaryKey;autoIncrement"`
+	JobName        string         `gorm:"column:job_name;size:80;not null;index:idx_scheduler_runs_job_time,priority:1"`
+	StartedAt      time.Time      `gorm:"column:started_at;not null;index:idx_scheduler_runs_job_time,sort:desc,priority:2"`
+	FinishedAt     time.Time      `gorm:"column:finished_at;not null"`
+	DurationMS     int            `gorm:"column:duration_ms;not null"`
+	Status         string         `gorm:"column:status;size:30;not null;index:idx_scheduler_runs_status_time,priority:1"`
+	RecordsSuccess int            `gorm:"column:records_success;default:0"`
+	RecordsError   int            `gorm:"column:records_error;default:0"`
+	RecordsSkipped int            `gorm:"column:records_skipped;default:0"`
+	ErrorCode      string         `gorm:"column:error_code;size:80"`
+	ErrorMessage   string         `gorm:"column:error_message;type:text"`
+	MetaJSON       datatypes.JSON `gorm:"column:meta_json;type:jsonb"`
+	CreatedAt      time.Time      `gorm:"column:created_at;not null;index:idx_scheduler_runs_status_time,sort:desc,priority:2"`
+}
