@@ -392,12 +392,12 @@ func (s *Service) loadCompetitorSummaries(ctx context.Context, limit int) ([]com
 	if err := s.db.WithContext(ctx).
 		Table("competitors AS c").
 		Select(`
-			c.address AS address,
-			COUNT(ct.id) AS total_trades,
-			COUNT(DISTINCT CASE WHEN ct.market_id <> '' THEN ct.market_id END) AS total_markets,
-			COUNT(DISTINCT CASE WHEN m.market_type IN ('temperature_high','temperature_low') THEN ct.market_id END) AS weather_markets,
-			CAST(COALESCE(SUM(ct.amount_usdc), 0) AS TEXT) AS total_volume,
-			MAX(ct.timestamp) AS last_seen_at
+				c.address AS address,
+				COUNT(ct.id) AS total_trades,
+				COUNT(DISTINCT CASE WHEN ct.market_id IS NOT NULL THEN ct.market_id END) AS total_markets,
+				COUNT(DISTINCT CASE WHEN m.market_type IN ('temperature_high','temperature_low') THEN ct.market_id END) AS weather_markets,
+				CAST(COALESCE(SUM(ct.amount_usdc), 0) AS TEXT) AS total_volume,
+				MAX(ct.timestamp) AS last_seen_at
 		`).
 		Joins("JOIN competitor_trades ct ON ct.competitor_id = c.id").
 		Joins("LEFT JOIN markets m ON m.id = ct.market_id").
@@ -454,9 +454,9 @@ func (s *Service) loadPositionSummaries(ctx context.Context, limit int) ([]posit
 			END), 0) AS TEXT) AS size,
 			MIN(ct.timestamp) AS first_entry_at,
 			MAX(ct.timestamp) AS last_update_at
-		`).
+			`).
 		Joins("JOIN competitor_trades ct ON ct.competitor_id = c.id").
-		Where("ct.market_id <> '' AND ct.outcome <> ''").
+		Where("ct.market_id IS NOT NULL AND ct.outcome <> ''").
 		Group("c.address, ct.market_id, ct.outcome").
 		Order("last_update_at DESC").
 		Limit(limit * 20).

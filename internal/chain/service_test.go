@@ -3,6 +3,7 @@ package chain
 import (
 	"context"
 	"crypto/ecdsa"
+	"database/sql"
 	"encoding/hex"
 	"errors"
 	"math/big"
@@ -31,6 +32,8 @@ type mockEthClient struct {
 	headers        map[uint64]*ethtypes.Header
 	blockNumberErr error
 	filterLogsErr  error
+	maxLogRange    uint64
+	filterLogCalls int
 }
 
 func (m *mockEthClient) BlockNumber(context.Context) (uint64, error) {
@@ -41,8 +44,16 @@ func (m *mockEthClient) BlockNumber(context.Context) (uint64, error) {
 }
 
 func (m *mockEthClient) FilterLogs(_ context.Context, q ethereum.FilterQuery) ([]ethtypes.Log, error) {
+	m.filterLogCalls++
 	if m.filterLogsErr != nil {
 		return nil, m.filterLogsErr
+	}
+	if m.maxLogRange > 0 && q.FromBlock != nil && q.ToBlock != nil {
+		from := q.FromBlock.Uint64()
+		to := q.ToBlock.Uint64()
+		if to >= from && to-from+1 > m.maxLogRange {
+			return nil, errors.New("400 Bad Request: Under the Free tier plan, you can make eth_getLogs requests with up to a 10 block range")
+		}
 	}
 	out := make([]ethtypes.Log, 0, len(m.logs))
 	for _, lg := range m.logs {
@@ -187,8 +198,8 @@ func TestScanAndDetectBots(t *testing.T) {
 	if res2.InsertedTrades != 0 {
 		t.Fatalf("expected second run inserted 0, got %d", res2.InsertedTrades)
 	}
-	if res2.DuplicateTrades != 4 {
-		t.Fatalf("expected second run duplicate 4, got %d", res2.DuplicateTrades)
+	if res2.DuplicateTrades != 0 {
+		t.Fatalf("expected second run duplicate 0 with incremental scanning, got %d", res2.DuplicateTrades)
 	}
 }
 
@@ -220,6 +231,62 @@ func TestScanBlockNumberError(t *testing.T) {
 	}
 	if !errors.Is(err, ErrChainUnavailable) {
 		t.Fatalf("expected ErrChainUnavailable, got %v", err)
+	}
+}
+
+func TestScanFallsBackToRecentWindowOnRPCRangeLimit(t *testing.T) {
+	db := setupChainTestDB(t)
+	client, _ := buildMockEthClient(t)
+	client.maxLogRange = 10
+
+	svc := newServiceWithClient(config.ChainConfig{
+		RPCURL:                 "http://mock",
+		ChainID:                137,
+		CTFExchangeAddress:     "0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E",
+		NegRiskExchangeAddress: "0xC5d563A36AE78145C45a50134d48A1215220f80a",
+		ScanLookbackBlocks:     500,
+	}, db, zap.NewNop(), client)
+
+	res, err := svc.Scan(context.Background(), ScanOptions{})
+	if err != nil {
+		t.Fatalf("scan with fallback: %v", err)
+	}
+	if res.FromBlock != 191 {
+		t.Fatalf("expected degraded from block 191, got %d", res.FromBlock)
+	}
+	if client.filterLogCalls < 2 {
+		t.Fatalf("expected fallback path with at least 2 filter logs calls, got %d", client.filterLogCalls)
+	}
+}
+
+func TestPersistObservedAllowsNullMarketID(t *testing.T) {
+	db := setupChainTestDB(t)
+	svc := newServiceWithClient(config.ChainConfig{}, db, zap.NewNop(), &mockEthClient{})
+
+	inserted, duplicated, updated, err := svc.persistObserved(context.Background(), []observedTx{
+		{
+			Address:     "0xaaa0000000000000000000000000000000000001",
+			TxHash:      "0xdeadbeef",
+			BlockNumber: 1,
+			Timestamp:   time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
+		},
+	}, 1, 10)
+	if err != nil {
+		t.Fatalf("persist observed: %v", err)
+	}
+	if inserted != 1 || duplicated != 0 || updated != 1 {
+		t.Fatalf("unexpected counters inserted=%d duplicated=%d updated=%d", inserted, duplicated, updated)
+	}
+
+	type row struct {
+		MarketID sql.NullString `gorm:"column:market_id"`
+	}
+	var got row
+	if err := db.Raw("SELECT market_id FROM competitor_trades WHERE tx_hash = ?", "0xdeadbeef").Scan(&got).Error; err != nil {
+		t.Fatalf("query competitor trade: %v", err)
+	}
+	if got.MarketID.Valid {
+		t.Fatalf("expected market_id to be NULL when token mapping is missing")
 	}
 }
 

@@ -36,12 +36,28 @@ func RegisterDefaultJobs(mgr *Manager, cfg *config.Config, db *gorm.DB, marketSv
 					return JobResult{}, err
 				}
 				out := JobResult{Records: make([]FetchRecord, 0, 3)}
+				if res.MarketsFetched == 0 {
+					out.SkipReason = "no markets fetched from upstream"
+					out.Errors = append(out.Errors, JobIssue{
+						Code:    errCodeEmptyMarketSet,
+						Message: "market sync skipped: upstream returned 0 markets",
+						Source:  "market_sync",
+						Count:   1,
+					})
+					out.Records = append(out.Records, FetchRecord{Entity: "markets", Result: "skipped", Count: 1})
+				}
 				out.Records = append(out.Records,
 					FetchRecord{Entity: "markets", Result: "success", Count: res.MarketsUpserted},
 					FetchRecord{Entity: "prices", Result: "success", Count: res.PriceSnapshots},
 				)
 				if len(res.Errors) > 0 {
 					out.Records = append(out.Records, FetchRecord{Entity: "market_sync_errors", Result: "error", Count: len(res.Errors)})
+					out.Warnings = append(out.Warnings, JobIssue{
+						Code:    errCodeMarketSyncPartial,
+						Message: fmt.Sprintf("market sync finished with %d warnings", len(res.Errors)),
+						Source:  "market_sync",
+						Count:   len(res.Errors),
+					})
 				}
 				out.Freshness = map[string]float64{"markets": 0}
 				return out, nil
@@ -62,7 +78,17 @@ func RegisterDefaultJobs(mgr *Manager, cfg *config.Config, db *gorm.DB, marketSv
 					return JobResult{}, err
 				}
 				if len(cities) == 0 {
-					return JobResult{}, nil
+					return JobResult{
+						SkipReason: "no active market cities",
+						Errors: []JobIssue{
+							{
+								Code:    errCodeEmptyCitySet,
+								Message: "weather forecast skipped: no active cities from markets table",
+								Source:  "weather_forecast",
+								Count:   1,
+							},
+						},
+					}, nil
 				}
 
 				concurrency := wc.CityConcurrency
@@ -113,7 +139,7 @@ func RegisterDefaultJobs(mgr *Manager, cfg *config.Config, db *gorm.DB, marketSv
 					return JobResult{}, fmt.Errorf("weather forecast failed for all %d cities", failedCity)
 				}
 
-				return JobResult{
+				out := JobResult{
 					Records: []FetchRecord{
 						{Entity: "cities", Result: "success", Count: successCity},
 						{Entity: "cities", Result: "error", Count: failedCity},
@@ -121,43 +147,62 @@ func RegisterDefaultJobs(mgr *Manager, cfg *config.Config, db *gorm.DB, marketSv
 						{Entity: "provider_errors", Result: "error", Count: providerErrors},
 					},
 					Freshness: map[string]float64{"forecasts": 0},
-				}, nil
+				}
+				if providerErrors > 0 {
+					out.Warnings = append(out.Warnings, JobIssue{
+						Code:    errCodeUpstream5xx,
+						Message: fmt.Sprintf("weather providers returned %d non-fatal errors", providerErrors),
+						Source:  "weather_forecast",
+						Count:   providerErrors,
+					})
+				}
+				return out, nil
 			},
 		})
 	}
 
 	cc := cfg.Scheduler.Jobs.ChainScan
 	if cc.Enabled && cc.Interval > 0 && chainSvc != nil {
-		if strings.TrimSpace(cfg.Chain.RPCURL) == "" {
-			if log != nil {
-				log.Info("skip chain_scan scheduler job: chain.rpc_url is empty")
-			}
-		} else {
-			mgr.Register(Job{
-				Name:      "chain_scan",
-				Interval:  cc.Interval,
-				Timeout:   cc.Timeout,
-				Immediate: cc.Immediate,
-				Run: func(ctx context.Context) (JobResult, error) {
-					res, err := chainSvc.Scan(ctx, chain.ScanOptions{
-						LookbackBlocks: cc.LookbackBlocks,
-						MaxTx:          cc.MaxTx,
-					})
-					if err != nil {
-						return JobResult{}, err
-					}
-					return JobResult{
-						Records: []FetchRecord{
-							{Entity: "observed_logs", Result: "success", Count: res.ObservedLogs},
-							{Entity: "observed_tx", Result: "success", Count: res.ObservedTx},
-							{Entity: "trades_inserted", Result: "success", Count: res.InsertedTrades},
-							{Entity: "trades_duplicate", Result: "skipped", Count: res.DuplicateTrades},
-						},
-						Freshness: map[string]float64{"chain": 0},
-					}, nil
-				},
-			})
+		if strings.TrimSpace(cfg.Chain.RPCURL) == "" && log != nil {
+			log.Info("register chain_scan scheduler job with skipped_no_input fallback: chain.rpc_url is empty")
 		}
+		mgr.Register(Job{
+			Name:      "chain_scan",
+			Interval:  cc.Interval,
+			Timeout:   cc.Timeout,
+			Immediate: cc.Immediate,
+			Run: func(ctx context.Context) (JobResult, error) {
+				if strings.TrimSpace(cfg.Chain.RPCURL) == "" {
+					return JobResult{
+						SkipReason: "chain.rpc_url is empty",
+						Errors: []JobIssue{
+							{
+								Code:    errCodeChainRPCEmpty,
+								Message: "chain scan skipped: chain.rpc_url is empty",
+								Source:  "chain_scan",
+								Count:   1,
+							},
+						},
+					}, nil
+				}
+				res, err := chainSvc.Scan(ctx, chain.ScanOptions{
+					LookbackBlocks: cc.LookbackBlocks,
+					MaxTx:          cc.MaxTx,
+				})
+				if err != nil {
+					return JobResult{}, err
+				}
+				return JobResult{
+					Records: []FetchRecord{
+						{Entity: "observed_logs", Result: "success", Count: res.ObservedLogs},
+						{Entity: "observed_tx", Result: "success", Count: res.ObservedTx},
+						{Entity: "trades_inserted", Result: "success", Count: res.InsertedTrades},
+						{Entity: "trades_duplicate", Result: "skipped", Count: res.DuplicateTrades},
+					},
+					Freshness: map[string]float64{"chain": 0},
+				}, nil
+			},
+		})
 	}
 
 	sc := cfg.Scheduler.Jobs.SimCycle

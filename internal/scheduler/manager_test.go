@@ -2,12 +2,25 @@ package scheduler
 
 import (
 	"context"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"sky-alpha-pro/pkg/config"
 )
+
+type testRunRecorder struct {
+	mu   sync.Mutex
+	runs []RunRecord
+}
+
+func (r *testRunRecorder) RecordSchedulerRun(_ context.Context, rec RunRecord) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.runs = append(r.runs, rec)
+	return nil
+}
 
 func TestManagerStartRunsImmediateJob(t *testing.T) {
 	mgr := NewManager(config.SchedulerConfig{
@@ -87,4 +100,53 @@ func TestManagerWaitReturnsAfterCancel(t *testing.T) {
 	if atomic.LoadInt32(&runs) == 0 {
 		t.Fatalf("expected job to run at least once")
 	}
+}
+
+func TestManagerSnapshotAndRunRecorder(t *testing.T) {
+	mgr := NewManager(config.SchedulerConfig{
+		Enabled:            true,
+		RunOnStart:         true,
+		DefaultTimeout:     time.Second,
+		DefaultJitterRatio: 0,
+	}, nil, nil)
+	recorder := &testRunRecorder{}
+	mgr.SetRunRecorder(recorder)
+
+	mgr.Register(Job{
+		Name:      "skip_job",
+		Interval:  200 * time.Millisecond,
+		Immediate: true,
+		Run: func(ctx context.Context) (JobResult, error) {
+			return JobResult{
+				SkipReason: "no input",
+				Errors: []JobIssue{{
+					Code:    errCodeEmptyCitySet,
+					Message: "no active cities",
+					Source:  "test",
+					Count:   1,
+				}},
+			}, nil
+		},
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	mgr.Start(ctx)
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		s := mgr.Snapshot()
+		if len(s.Jobs) == 1 && s.Jobs[0].LastStatus == statusSkippedNoInput {
+			cancel()
+			mgr.Wait()
+			if len(recorder.runs) == 0 {
+				t.Fatalf("expected scheduler run to be recorded")
+			}
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	cancel()
+	mgr.Wait()
+	t.Fatalf("expected snapshot last status=%s", statusSkippedNoInput)
 }

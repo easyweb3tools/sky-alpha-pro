@@ -35,6 +35,8 @@ const (
 	maxListLimit                = 500
 	maxScanTx                   = 10000
 	scanRPCConcurrency          = 20
+	adaptiveWindowBlocks        = uint64(10)
+	filterLogsRetryAttempts     = 3
 )
 
 var (
@@ -60,6 +62,9 @@ type Service struct {
 	log    *zap.Logger
 	client ethClient
 	mu     sync.Mutex
+
+	scanMu           sync.Mutex
+	lastScannedBlock uint64
 }
 
 type observedTx struct {
@@ -147,26 +152,24 @@ func (s *Service) Scan(ctx context.Context, opts ScanOptions) (*ScanResult, erro
 	if lookback == 0 {
 		lookback = defaultLookbackBlocks
 	}
-	from := uint64(0)
-	if latest+1 > lookback {
-		from = latest - lookback + 1
-	}
-	result.FromBlock = from
+	from := s.computeFromBlock(latest, lookback)
 	result.ToBlock = latest
+	if from > latest {
+		result.FromBlock = from
+		result.FinishedAt = time.Now().UTC()
+		s.markScanProgress(latest)
+		return result, nil
+	}
 
 	addresses, err := s.resolveExchangeAddresses()
 	if err != nil {
 		return nil, err
 	}
-	logs, err := client.FilterLogs(ctx, ethereum.FilterQuery{
-		FromBlock: new(big.Int).SetUint64(from),
-		ToBlock:   new(big.Int).SetUint64(latest),
-		Addresses: addresses,
-		Topics:    [][]common.Hash{{orderFilledEventTopic}},
-	})
+	logs, usedFrom, err := s.fetchOrderFilledLogs(ctx, client, from, latest, addresses)
 	if err != nil {
 		return nil, fmt.Errorf("%w: filter logs: %v", ErrChainUnavailable, err)
 	}
+	result.FromBlock = usedFrom
 	result.ObservedLogs = len(logs)
 
 	maxTx := opts.MaxTx
@@ -258,7 +261,125 @@ func (s *Service) Scan(ctx context.Context, opts ScanOptions) (*ScanResult, erro
 	result.DuplicateTrades = duplicated
 	result.UpdatedCompetitor = updatedComp
 	result.FinishedAt = time.Now().UTC()
+	s.markScanProgress(latest)
 	return result, nil
+}
+
+func (s *Service) computeFromBlock(latest uint64, lookback uint64) uint64 {
+	from := uint64(0)
+	if latest+1 > lookback {
+		from = latest - lookback + 1
+	}
+
+	s.scanMu.Lock()
+	defer s.scanMu.Unlock()
+	if s.lastScannedBlock == 0 {
+		return from
+	}
+
+	next := s.lastScannedBlock + 1
+	if next > latest {
+		return latest + 1
+	}
+	if next > from {
+		return next
+	}
+	return from
+}
+
+func (s *Service) markScanProgress(latest uint64) {
+	s.scanMu.Lock()
+	defer s.scanMu.Unlock()
+	if latest > s.lastScannedBlock {
+		s.lastScannedBlock = latest
+	}
+}
+
+func (s *Service) fetchOrderFilledLogs(
+	ctx context.Context,
+	client ethClient,
+	from uint64,
+	to uint64,
+	addresses []common.Address,
+) ([]ethtypes.Log, uint64, error) {
+	logs, err := s.filterLogsWithRetry(ctx, client, from, to, addresses)
+	if err == nil {
+		return logs, from, nil
+	}
+	if !isRateLimitOrRangeError(err) {
+		return nil, from, err
+	}
+
+	fallbackFrom := from
+	if to+1 > adaptiveWindowBlocks {
+		windowFrom := to - adaptiveWindowBlocks + 1
+		if windowFrom > fallbackFrom {
+			fallbackFrom = windowFrom
+		}
+	}
+	if s.log != nil && fallbackFrom != from {
+		s.log.Warn("chain scan degraded to recent block window due rpc limits",
+			zap.Uint64("requested_from", from),
+			zap.Uint64("degraded_from", fallbackFrom),
+			zap.Uint64("to", to),
+			zap.Error(err),
+		)
+	}
+
+	retryLogs, retryErr := s.filterLogsWithRetry(ctx, client, fallbackFrom, to, addresses)
+	if retryErr != nil {
+		return nil, fallbackFrom, retryErr
+	}
+	return retryLogs, fallbackFrom, nil
+}
+
+func (s *Service) filterLogsWithRetry(
+	ctx context.Context,
+	client ethClient,
+	from uint64,
+	to uint64,
+	addresses []common.Address,
+) ([]ethtypes.Log, error) {
+	query := ethereum.FilterQuery{
+		FromBlock: new(big.Int).SetUint64(from),
+		ToBlock:   new(big.Int).SetUint64(to),
+		Addresses: addresses,
+		Topics:    [][]common.Hash{{orderFilledEventTopic}},
+	}
+	var lastErr error
+	for attempt := 1; attempt <= filterLogsRetryAttempts; attempt++ {
+		logs, err := client.FilterLogs(ctx, query)
+		if err == nil {
+			return logs, nil
+		}
+		lastErr = err
+		if attempt == filterLogsRetryAttempts || !isRateLimitOrRangeError(err) {
+			break
+		}
+		wait := time.Duration(attempt) * time.Second
+		timer := time.NewTimer(wait)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return nil, ctx.Err()
+		case <-timer.C:
+		}
+	}
+	return nil, lastErr
+}
+
+func isRateLimitOrRangeError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "429") ||
+		strings.Contains(msg, "too many requests") ||
+		strings.Contains(msg, "rate limit") ||
+		strings.Contains(msg, "compute units capacity") ||
+		strings.Contains(msg, "eth_getlogs requests with up to a 10 block range") ||
+		strings.Contains(msg, "up to a 10 block range") ||
+		strings.Contains(msg, "block range should work")
 }
 
 func (s *Service) fetchTxMetaConcurrently(
@@ -400,11 +521,13 @@ func (s *Service) ListCompetitorTrades(ctx context.Context, address string, limi
 		it := CompetitorTradeView{
 			TxHash:      row.TxHash,
 			BlockNumber: row.BlockNumber,
-			MarketID:    row.MarketID,
 			Side:        row.Side,
 			Outcome:     row.Outcome,
 			Timestamp:   row.Timestamp,
 			CreatedAt:   row.CreatedAt,
+		}
+		if row.MarketID != nil {
+			it.MarketID = *row.MarketID
 		}
 		if row.AmountUSDC.Valid {
 			v := row.AmountUSDC.Decimal.InexactFloat64()
@@ -478,7 +601,8 @@ func (s *Service) persistObserved(
 				trade.AmountUSDC = decimal.NewNullDecimal(row.AmountUSDC)
 			}
 			if ref, ok := tokenMap[row.TokenID]; ok {
-				trade.MarketID = ref.MarketID
+				marketID := ref.MarketID
+				trade.MarketID = &marketID
 				trade.Outcome = ref.Outcome
 			}
 

@@ -41,14 +41,6 @@ func newServeCmd() *cobra.Command {
 			if services.Chain != nil {
 				defer services.Chain.Close()
 			}
-			handler := server.NewRouterWithServices(appConfig, appLogger, db, metricReg, services)
-			httpServer := &http.Server{
-				Addr:              fmt.Sprintf("%s:%d", appConfig.Server.Host, appConfig.Server.Port),
-				Handler:           handler,
-				ReadHeaderTimeout: appConfig.Server.ReadHeaderTimeout,
-				ReadTimeout:       appConfig.Server.ReadTimeout,
-				WriteTimeout:      appConfig.Server.WriteTimeout,
-			}
 
 			sigCtx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 			defer stop()
@@ -62,7 +54,18 @@ func newServeCmd() *cobra.Command {
 			simSvc := sim.NewService(appConfig.Sim, db, appLogger, services.Market, services.Weather, services.Signal, simTradeSvc)
 
 			schedulerMgr := scheduler.NewManager(appConfig.Scheduler, appLogger, metricReg)
+			schedulerMgr.SetRunRecorder(scheduler.NewGormRunRecorder(db))
 			scheduler.RegisterDefaultJobs(schedulerMgr, appConfig, db, services.Market, services.Weather, services.Chain, simSvc, appLogger)
+
+			handler := server.NewRouterWithServices(appConfig, appLogger, db, metricReg, services, schedulerMgr)
+			httpServer := &http.Server{
+				Addr:              fmt.Sprintf("%s:%d", appConfig.Server.Host, appConfig.Server.Port),
+				Handler:           handler,
+				ReadHeaderTimeout: appConfig.Server.ReadHeaderTimeout,
+				ReadTimeout:       appConfig.Server.ReadTimeout,
+				WriteTimeout:      appConfig.Server.WriteTimeout,
+			}
+
 			schedulerMgr.Start(sigCtx)
 
 			errCh := make(chan error, 1)

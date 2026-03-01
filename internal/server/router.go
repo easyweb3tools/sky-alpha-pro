@@ -7,21 +7,23 @@ import (
 	"go.uber.org/zap"
 	"gorm.io/gorm"
 
+	"sky-alpha-pro/internal/scheduler"
 	"sky-alpha-pro/pkg/config"
 	"sky-alpha-pro/pkg/metrics"
 )
 
 func NewRouter(cfg *config.Config, log *zap.Logger, db *gorm.DB, metricReg *metrics.Registry) http.Handler {
-	return NewRouterWithServices(cfg, log, db, metricReg, NewServices(cfg, log, db))
+	return NewRouterWithServices(cfg, log, db, metricReg, NewServices(cfg, log, db), nil)
 }
 
-func NewRouterWithServices(cfg *config.Config, log *zap.Logger, db *gorm.DB, metricReg *metrics.Registry, services *Services) http.Handler {
+func NewRouterWithServices(cfg *config.Config, log *zap.Logger, db *gorm.DB, metricReg *metrics.Registry, services *Services, schedulerMgr *scheduler.Manager) http.Handler {
 	gin.SetMode(gin.ReleaseMode)
 	router := gin.New()
 	router.Use(Recovery(log))
 	router.Use(RequestLogger(log))
 
 	router.GET("/health", HealthHandler(cfg, db))
+	router.GET("/ops/status", OpsStatusHandler(cfg, metricReg, schedulerMgr))
 	if metricReg != nil && metricReg.Enabled() {
 		router.GET(metricReg.Path(), gin.WrapH(metricReg.Handler()))
 	}
@@ -32,6 +34,7 @@ func NewRouterWithServices(cfg *config.Config, log *zap.Logger, db *gorm.DB, met
 	api := router.Group("/api/v1")
 	{
 		api.GET("/health", HealthHandler(cfg, db))
+		api.GET("/ops/status", OpsStatusHandler(cfg, metricReg, schedulerMgr))
 		api.GET("/markets", ListMarketsHandler(services.Market))
 		api.POST("/markets/sync", SyncMarketsHandler(services.Market))
 		api.GET("/weather/forecast", GetForecastHandler(services.Weather))

@@ -31,9 +31,9 @@ func TestRefreshFromCompetitorsAndList(t *testing.T) {
 	}
 
 	trades := []model.CompetitorTrade{
-		{CompetitorID: 1, MarketID: "m1", Outcome: "YES", AmountUSDC: decimal.NewNullDecimal(decimal.NewFromFloat(12.3)), Timestamp: now.Add(-2 * time.Hour), TxHash: "0x01", BlockNumber: 1, CreatedAt: now},
-		{CompetitorID: 1, MarketID: "m2", Outcome: "NO", AmountUSDC: decimal.NewNullDecimal(decimal.NewFromFloat(8.1)), Timestamp: now.Add(-1 * time.Hour), TxHash: "0x02", BlockNumber: 2, CreatedAt: now},
-		{CompetitorID: 2, MarketID: "m1", Outcome: "NO", AmountUSDC: decimal.NewNullDecimal(decimal.NewFromFloat(3.2)), Timestamp: now.Add(-30 * time.Minute), TxHash: "0x03", BlockNumber: 3, CreatedAt: now},
+		{CompetitorID: 1, MarketID: stringPtr("m1"), Outcome: "YES", AmountUSDC: decimal.NewNullDecimal(decimal.NewFromFloat(12.3)), Timestamp: now.Add(-2 * time.Hour), TxHash: "0x01", BlockNumber: 1, CreatedAt: now},
+		{CompetitorID: 1, MarketID: stringPtr("m2"), Outcome: "NO", AmountUSDC: decimal.NewNullDecimal(decimal.NewFromFloat(8.1)), Timestamp: now.Add(-1 * time.Hour), TxHash: "0x02", BlockNumber: 2, CreatedAt: now},
+		{CompetitorID: 2, MarketID: stringPtr("m1"), Outcome: "NO", AmountUSDC: decimal.NewNullDecimal(decimal.NewFromFloat(3.2)), Timestamp: now.Add(-30 * time.Minute), TxHash: "0x03", BlockNumber: 3, CreatedAt: now},
 	}
 	if err := db.Create(&trades).Error; err != nil {
 		t.Fatalf("seed competitor trades: %v", err)
@@ -237,4 +237,8 @@ func setupPlayerTestDB(t *testing.T) *gorm.DB {
 		t.Fatalf("create markets table: %v", err)
 	}
 	return db
+}
+
+func stringPtr(v string) *string {
+	return &v
 }
