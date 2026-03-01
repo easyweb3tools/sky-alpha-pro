@@ -37,7 +37,7 @@ func newServeCmd() *cobra.Command {
 			}
 
 			metricReg := metrics.New(appConfig.Metrics)
-			services := server.NewServices(appConfig, appLogger, db)
+			services := server.NewServicesWithMetrics(appConfig, appLogger, db, metricReg)
 			if services.Chain != nil {
 				defer services.Chain.Close()
 			}

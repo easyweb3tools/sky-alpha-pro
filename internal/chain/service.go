@@ -23,6 +23,7 @@ import (
 
 	"sky-alpha-pro/internal/model"
 	"sky-alpha-pro/pkg/config"
+	"sky-alpha-pro/pkg/metrics"
 )
 
 const (
@@ -61,8 +62,10 @@ type Service struct {
 	cfg    config.ChainConfig
 	db     *gorm.DB
 	log    *zap.Logger
+	m      *metrics.Registry
 	client ethClient
 	mu     sync.Mutex
+	mm     sync.RWMutex
 
 	scanMu           sync.Mutex
 	lastScannedBlock uint64
@@ -108,6 +111,12 @@ func newServiceWithClient(cfg config.ChainConfig, db *gorm.DB, log *zap.Logger, 
 	return &Service{cfg: cfg, db: db, log: log, client: c}
 }
 
+func (s *Service) SetMetrics(reg *metrics.Registry) {
+	s.mm.Lock()
+	defer s.mm.Unlock()
+	s.m = reg
+}
+
 func (s *Service) Close() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -127,7 +136,9 @@ func (s *Service) ensureClient(ctx context.Context) (ethClient, error) {
 	if rpcURL == "" {
 		return nil, fmt.Errorf("%w: chain.rpc_url is empty", ErrChainUnavailable)
 	}
+	start := time.Now()
 	c, err := ethclient.DialContext(ctx, rpcURL)
+	s.observeRPC("dial", start, err)
 	if err != nil {
 		return nil, fmt.Errorf("%w: dial rpc: %v", ErrChainUnavailable, err)
 	}
@@ -374,7 +385,9 @@ func (s *Service) filterLogsWithRetry(
 	}
 	var lastErr error
 	for attempt := 1; attempt <= filterLogsRetryAttempts; attempt++ {
+		start := time.Now()
 		logs, err := client.FilterLogs(ctx, query)
+		s.observeRPC("eth_getLogs", start, err)
 		if err == nil {
 			return logs, nil
 		}
@@ -397,7 +410,9 @@ func (s *Service) filterLogsWithRetry(
 func (s *Service) blockNumberWithRetry(ctx context.Context, client ethClient) (uint64, error) {
 	var lastErr error
 	for attempt := 1; attempt <= blockNumberRetryAttempts; attempt++ {
+		start := time.Now()
 		latest, err := client.BlockNumber(ctx)
+		s.observeRPC("eth_blockNumber", start, err)
 		if err == nil {
 			return latest, nil
 		}
@@ -455,7 +470,9 @@ func (s *Service) fetchTxMetaConcurrently(
 		if cached != nil {
 			return cached, nil
 		}
+		start := time.Now()
 		head, err := client.HeaderByNumber(gctx, new(big.Int).SetUint64(blockNumber))
+		s.observeRPC("eth_getBlockByNumber", start, err)
 		if err != nil {
 			return nil, err
 		}
@@ -479,7 +496,9 @@ func (s *Service) fetchTxMetaConcurrently(
 		h := hash
 		blockNumber := logBlockByHash[h]
 		g.Go(func() error {
+			start := time.Now()
 			tx, pending, err := client.TransactionByHash(gctx, h)
+			s.observeRPC("eth_getTransactionByHash", start, err)
 			if err != nil || pending || tx == nil {
 				return nil
 			}
@@ -509,6 +528,24 @@ func (s *Service) fetchTxMetaConcurrently(
 	}
 	_ = g.Wait()
 	return metas
+}
+
+func (s *Service) observeRPC(method string, start time.Time, err error) {
+	status := "ok"
+	if err != nil {
+		if isRateLimitOrRangeError(err) {
+			status = "rate_limited"
+		} else {
+			status = "error"
+		}
+	}
+	s.mm.RLock()
+	reg := s.m
+	s.mm.RUnlock()
+	if reg == nil {
+		return
+	}
+	reg.AddChainRPCRequest(method, status, time.Since(start))
 }
 
 func (s *Service) ListCompetitors(ctx context.Context, opts ListCompetitorsOptions) ([]CompetitorView, error) {

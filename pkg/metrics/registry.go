@@ -28,9 +28,18 @@ type Registry struct {
 	jobConsecutiveFailures  *prometheus.GaugeVec
 	fetchRecordsTotal       *prometheus.CounterVec
 	dataFreshnessSeconds    *prometheus.GaugeVec
+	chainRPCRequestsTotal   *prometheus.CounterVec
+	chainRPCDurationSeconds *prometheus.HistogramVec
+	chainRPCRequestsPerSec  *prometheus.GaugeVec
 
 	cacheMu               sync.RWMutex
 	dataFreshnessSnapshot map[string]float64
+	chainRPCSecState      map[string]rpcSecState
+}
+
+type rpcSecState struct {
+	second int64
+	count  int
 }
 
 func New(cfg config.MetricsConfig) *Registry {
@@ -101,6 +110,25 @@ func New(cfg config.MetricsConfig) *Registry {
 			Name:      "records_total",
 			Help:      "Fetched records by job/entity/result.",
 		}, []string{"job", "entity", "result"}),
+		chainRPCRequestsTotal: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Namespace: "sky_alpha",
+			Subsystem: "chain",
+			Name:      "rpc_requests_total",
+			Help:      "Total chain RPC requests grouped by method and status.",
+		}, []string{"method", "status"}),
+		chainRPCDurationSeconds: prometheus.NewHistogramVec(prometheus.HistogramOpts{
+			Namespace: "sky_alpha",
+			Subsystem: "chain",
+			Name:      "rpc_duration_seconds",
+			Help:      "Chain RPC request duration in seconds grouped by method and status.",
+			Buckets:   []float64{0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2, 5, 10},
+		}, []string{"method", "status"}),
+		chainRPCRequestsPerSec: prometheus.NewGaugeVec(prometheus.GaugeOpts{
+			Namespace: "sky_alpha",
+			Subsystem: "chain",
+			Name:      "rpc_requests_per_second",
+			Help:      "In-process per-second chain RPC request count grouped by method and status.",
+		}, []string{"method", "status"}),
 		dataFreshnessSeconds: prometheus.NewGaugeVec(prometheus.GaugeOpts{
 			Namespace: "sky_alpha",
 			Subsystem: "data",
@@ -108,6 +136,7 @@ func New(cfg config.MetricsConfig) *Registry {
 			Help:      "Dataset freshness in seconds.",
 		}, []string{"dataset"}),
 		dataFreshnessSnapshot: make(map[string]float64),
+		chainRPCSecState:      make(map[string]rpcSecState),
 	}
 
 	r.reg.MustRegister(
@@ -122,6 +151,9 @@ func New(cfg config.MetricsConfig) *Registry {
 		r.jobNextRunTimestamp,
 		r.jobConsecutiveFailures,
 		r.fetchRecordsTotal,
+		r.chainRPCRequestsTotal,
+		r.chainRPCDurationSeconds,
+		r.chainRPCRequestsPerSec,
 		r.dataFreshnessSeconds,
 	)
 	return r
@@ -208,6 +240,36 @@ func (r *Registry) AddFetchRecords(job, entity, result string, n int) {
 		return
 	}
 	r.fetchRecordsTotal.WithLabelValues(job, entity, result).Add(float64(n))
+}
+
+func (r *Registry) AddChainRPCRequest(method string, status string, duration time.Duration) {
+	if !r.Enabled() {
+		return
+	}
+	m := strings.TrimSpace(method)
+	if m == "" {
+		m = "unknown"
+	}
+	s := strings.TrimSpace(status)
+	if s == "" {
+		s = "unknown"
+	}
+
+	r.chainRPCRequestsTotal.WithLabelValues(m, s).Inc()
+	r.chainRPCDurationSeconds.WithLabelValues(m, s).Observe(duration.Seconds())
+
+	key := m + "|" + s
+	nowSec := time.Now().Unix()
+	r.cacheMu.Lock()
+	state := r.chainRPCSecState[key]
+	if state.second != nowSec {
+		state.second = nowSec
+		state.count = 0
+	}
+	state.count++
+	r.chainRPCSecState[key] = state
+	r.cacheMu.Unlock()
+	r.chainRPCRequestsPerSec.WithLabelValues(m, s).Set(float64(state.count))
 }
 
 func (r *Registry) SetDataFreshness(dataset string, seconds float64) {
