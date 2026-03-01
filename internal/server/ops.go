@@ -26,6 +26,8 @@ type opsConfigCheck struct {
 	AgentVertexProjectConfigured bool   `json:"agent_vertex_project_configured"`
 	VisualCrossingKeyConfigured  bool   `json:"visualcrossing_key_configured"`
 	ChainScanLookbackBlocks      uint64 `json:"chain_scan_lookback_blocks"`
+	ChainScanConfiguredIntervalS int64  `json:"chain_scan_configured_interval_seconds"`
+	ChainScanEffectiveIntervalS  int64  `json:"chain_scan_effective_interval_seconds"`
 }
 
 type opsSummary struct {
@@ -70,6 +72,8 @@ func OpsStatusHandler(cfg *config.Config, metricReg *metrics.Registry, scheduler
 				AgentVertexProjectConfigured: false,
 				VisualCrossingKeyConfigured:  false,
 				ChainScanLookbackBlocks:      0,
+				ChainScanConfiguredIntervalS: 0,
+				ChainScanEffectiveIntervalS:  0,
 			},
 		}
 		if schedulerMgr != nil {
@@ -89,6 +93,10 @@ func OpsStatusHandler(cfg *config.Config, metricReg *metrics.Registry, scheduler
 				AgentVertexProjectConfigured: strings.TrimSpace(cfg.Agent.VertexProject) != "",
 				VisualCrossingKeyConfigured:  strings.TrimSpace(cfg.Weather.VisualCrossingAPIKey) != "",
 				ChainScanLookbackBlocks:      lookback,
+				ChainScanConfiguredIntervalS: int64(cfg.Scheduler.Jobs.ChainScan.Interval.Seconds()),
+			}
+			if job, ok := findSchedulerJob(resp.Scheduler, "chain_scan"); ok {
+				resp.ConfigCheck.ChainScanEffectiveIntervalS = int64(job.IntervalSeconds)
 			}
 			if cfg.Scheduler.Jobs.ChainScan.Enabled && !resp.ConfigCheck.ChainRPCConfigured {
 				resp.Summary.Blockers = append(resp.Summary.Blockers, opsBlocker{
@@ -159,4 +167,13 @@ func classifySeverity(status, code string, consecutive int) string {
 	default:
 		return "info"
 	}
+}
+
+func findSchedulerJob(s scheduler.ManagerSnapshot, name string) (scheduler.JobRuntimeSnapshot, bool) {
+	for _, job := range s.Jobs {
+		if job.Name == name {
+			return job, true
+		}
+	}
+	return scheduler.JobRuntimeSnapshot{}, false
 }

@@ -66,6 +66,7 @@ type Service struct {
 
 	scanMu           sync.Mutex
 	lastScannedBlock uint64
+	filterRangeCap   uint64
 }
 
 type observedTx struct {
@@ -303,6 +304,12 @@ func (s *Service) fetchOrderFilledLogs(
 	to uint64,
 	addresses []common.Address,
 ) ([]ethtypes.Log, uint64, error) {
+	if cap := s.currentFilterRangeCap(); cap > 0 && to >= from {
+		span := to - from + 1
+		if span > cap {
+			from = to - cap + 1
+		}
+	}
 	logs, err := s.filterLogsWithRetry(ctx, client, from, to, addresses)
 	if err == nil {
 		return logs, from, nil
@@ -318,6 +325,7 @@ func (s *Service) fetchOrderFilledLogs(
 			fallbackFrom = windowFrom
 		}
 	}
+	s.setFilterRangeCap(adaptiveWindowBlocks)
 	if s.log != nil && fallbackFrom != from {
 		s.log.Warn("chain scan degraded to recent block window due rpc limits",
 			zap.Uint64("requested_from", from),
@@ -332,6 +340,23 @@ func (s *Service) fetchOrderFilledLogs(
 		return nil, fallbackFrom, retryErr
 	}
 	return retryLogs, fallbackFrom, nil
+}
+
+func (s *Service) currentFilterRangeCap() uint64 {
+	s.scanMu.Lock()
+	defer s.scanMu.Unlock()
+	return s.filterRangeCap
+}
+
+func (s *Service) setFilterRangeCap(cap uint64) {
+	if cap == 0 {
+		return
+	}
+	s.scanMu.Lock()
+	defer s.scanMu.Unlock()
+	if s.filterRangeCap == 0 || cap < s.filterRangeCap {
+		s.filterRangeCap = cap
+	}
 }
 
 func (s *Service) filterLogsWithRetry(

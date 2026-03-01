@@ -174,6 +174,12 @@ func RegisterDefaultJobs(mgr *Manager, cfg *config.Config, db *gorm.DB, marketSv
 			}
 			chainInterval = 30 * time.Second
 		}
+		if log != nil {
+			log.Info("register chain_scan scheduler job",
+				zap.Duration("configured_interval", cc.Interval),
+				zap.Duration("effective_interval", chainInterval),
+				zap.Bool("immediate", cc.Immediate))
+		}
 		if strings.TrimSpace(cfg.Chain.RPCURL) == "" && log != nil {
 			log.Info("register chain_scan scheduler job with skipped_no_input fallback: chain.rpc_url is empty")
 		}
@@ -285,19 +291,12 @@ func loadActiveCities(ctx context.Context, db *gorm.DB) ([]string, error) {
 		return nil, err
 	}
 	for _, row := range rows {
-		if !looksLikeWeatherMarket(row.Question, row.MarketType) {
-			continue
-		}
-		q := normalizeText(row.Question)
-		for _, c := range candidates {
-			if strings.Contains(q, c.keyword) {
-				if _, exists := citySet[c.city]; exists {
-					continue
-				}
-				citySet[c.city] = struct{}{}
-				cities = append(cities, c.city)
-			}
-		}
+		matchCitiesFromQuestion(row.Question, row.MarketType, candidates, citySet, &cities, true)
+	}
+	// Last-resort supplement: also parse all active market questions (not only weather-typed rows)
+	// because upstream market_type/city can be unknown/empty.
+	for _, row := range rows {
+		matchCitiesFromQuestion(row.Question, row.MarketType, candidates, citySet, &cities, false)
 	}
 	sort.Strings(cities)
 	return cities, nil
@@ -370,6 +369,33 @@ func looksLikeWeatherMarket(question string, marketType string) bool {
 		strings.Contains(q, "high temp") ||
 		strings.Contains(q, "low temp") ||
 		strings.Contains(q, "weather")
+}
+
+func matchCitiesFromQuestion(
+	question string,
+	marketType string,
+	candidates []cityCandidate,
+	citySet map[string]struct{},
+	cities *[]string,
+	weatherOnly bool,
+) {
+	if weatherOnly && !looksLikeWeatherMarket(question, marketType) {
+		return
+	}
+	q := normalizeText(question)
+	if q == "" {
+		return
+	}
+	for _, c := range candidates {
+		if !strings.Contains(q, c.keyword) {
+			continue
+		}
+		if _, exists := citySet[c.city]; exists {
+			continue
+		}
+		citySet[c.city] = struct{}{}
+		*cities = append(*cities, c.city)
+	}
 }
 
 func normalizeCity(v string) string {

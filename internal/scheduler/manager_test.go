@@ -3,12 +3,16 @@ package scheduler
 import (
 	"context"
 	"errors"
+	"io"
+	"net/http/httptest"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"sky-alpha-pro/pkg/config"
+	"sky-alpha-pro/pkg/metrics"
 )
 
 type testRunRecorder struct {
@@ -184,5 +188,25 @@ func TestComputeJobBackoffForRateLimit(t *testing.T) {
 	}
 	if backoff5 > 15*time.Minute {
 		t.Fatalf("expected capped backoff <= 15m, got %s", backoff5)
+	}
+}
+
+func TestFinishRunEmitsStructuredErrorMetricOnHardFailure(t *testing.T) {
+	reg := metrics.New(config.MetricsConfig{Enabled: true, Path: "/metrics"})
+	runner := &jobRunner{
+		name:    "chain_scan",
+		metrics: reg,
+	}
+	start := time.Now().UTC()
+	finish := start.Add(100 * time.Millisecond)
+	runner.finishRun(start, finish, statusError, "", "429 Too Many Requests", JobResult{}, errors.New("429 Too Many Requests"))
+
+	req := httptest.NewRequest("GET", "/metrics", nil)
+	rec := httptest.NewRecorder()
+	reg.Handler().ServeHTTP(rec, req)
+	body, _ := io.ReadAll(rec.Body)
+	text := string(body)
+	if !strings.Contains(text, `sky_alpha_scheduler_job_errors_total{error_code="unknown_error",job="chain_scan"} 1`) {
+		t.Fatalf("expected structured error metric emitted for chain_scan failure, got: %s", text)
 	}
 }
