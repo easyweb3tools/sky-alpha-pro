@@ -13,6 +13,7 @@ import (
 	"sky-alpha-pro/internal/trade"
 	"sky-alpha-pro/internal/weather"
 	"sky-alpha-pro/pkg/config"
+	"sky-alpha-pro/pkg/metrics"
 )
 
 type Services struct {
@@ -27,12 +28,19 @@ type Services struct {
 }
 
 func NewServices(cfg *config.Config, log *zap.Logger, db *gorm.DB) *Services {
+	return NewServicesWithMetrics(cfg, log, db, nil)
+}
+
+func NewServicesWithMetrics(cfg *config.Config, log *zap.Logger, db *gorm.DB, metricReg *metrics.Registry) *Services {
 	marketSvc := market.NewService(cfg.Market, db, log)
 	weatherSvc := weather.NewService(cfg.Weather, db, log)
 	signalSvc := signal.NewService(cfg.Signal, db, log)
 	agentSvc := agent.NewService(cfg.Agent, db, log, weatherSvc, signalSvc)
 	tradeSvc := trade.NewService(cfg.Trade, cfg.Market, db, log, signalSvc)
 	chainSvc := chain.NewService(cfg.Chain, db, log)
+	if chainSvc != nil {
+		chainSvc.SetMetrics(metricReg)
+	}
 	playerSvc := player.NewService(db, log)
 	simSvc := sim.NewService(cfg.Sim, db, log, marketSvc, weatherSvc, signalSvc, tradeSvc)
 

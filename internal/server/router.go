@@ -13,7 +13,7 @@ import (
 )
 
 func NewRouter(cfg *config.Config, log *zap.Logger, db *gorm.DB, metricReg *metrics.Registry) http.Handler {
-	return NewRouterWithServices(cfg, log, db, metricReg, NewServices(cfg, log, db), nil)
+	return NewRouterWithServices(cfg, log, db, metricReg, NewServicesWithMetrics(cfg, log, db, metricReg), nil)
 }
 
 func NewRouterWithServices(cfg *config.Config, log *zap.Logger, db *gorm.DB, metricReg *metrics.Registry, services *Services, schedulerMgr *scheduler.Manager) http.Handler {
@@ -28,7 +28,7 @@ func NewRouterWithServices(cfg *config.Config, log *zap.Logger, db *gorm.DB, met
 		router.GET(metricReg.Path(), gin.WrapH(metricReg.Handler()))
 	}
 	if services == nil {
-		services = NewServices(cfg, log, db)
+		services = NewServicesWithMetrics(cfg, log, db, metricReg)
 	}
 
 	api := router.Group("/api/v1")

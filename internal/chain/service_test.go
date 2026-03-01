@@ -6,7 +6,9 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"errors"
+	"io"
 	"math/big"
+	"net/http/httptest"
 	"sort"
 	"strings"
 	"testing"
@@ -23,6 +25,7 @@ import (
 
 	"sky-alpha-pro/internal/model"
 	"sky-alpha-pro/pkg/config"
+	"sky-alpha-pro/pkg/metrics"
 )
 
 type mockEthClient struct {
@@ -332,6 +335,41 @@ func TestPersistObservedAllowsNullMarketID(t *testing.T) {
 	}
 	if got.MarketID.Valid {
 		t.Fatalf("expected market_id to be NULL when token mapping is missing")
+	}
+}
+
+func TestScanEmitsChainRPCMetrics(t *testing.T) {
+	db := setupChainTestDB(t)
+	client, _ := buildMockEthClient(t)
+	reg := metrics.New(config.MetricsConfig{Enabled: true, Path: "/metrics"})
+
+	svc := newServiceWithClient(config.ChainConfig{
+		RPCURL:                 "http://mock",
+		ChainID:                137,
+		CTFExchangeAddress:     "0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E",
+		NegRiskExchangeAddress: "0xC5d563A36AE78145C45a50134d48A1215220f80a",
+		ScanLookbackBlocks:     500,
+	}, db, zap.NewNop(), client)
+	svc.SetMetrics(reg)
+
+	if _, err := svc.Scan(context.Background(), ScanOptions{}); err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest("GET", "/metrics", nil)
+	reg.Handler().ServeHTTP(rec, req)
+	body, _ := io.ReadAll(rec.Body)
+	text := string(body)
+
+	if !strings.Contains(text, `sky_alpha_chain_rpc_requests_total{method="eth_blockNumber",status="ok"}`) {
+		t.Fatalf("missing eth_blockNumber rpc request metric: %s", text)
+	}
+	if !strings.Contains(text, `sky_alpha_chain_rpc_requests_total{method="eth_getLogs",status="ok"}`) {
+		t.Fatalf("missing eth_getLogs rpc request metric: %s", text)
+	}
+	if !strings.Contains(text, `sky_alpha_chain_rpc_requests_per_second{method="eth_getTransactionByHash",status="ok"}`) {
+		t.Fatalf("missing per-second rpc metric: %s", text)
 	}
 }
 
