@@ -3,8 +3,10 @@ package scheduler
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"go.uber.org/zap"
 	"golang.org/x/sync/errgroup"
@@ -163,12 +165,21 @@ func RegisterDefaultJobs(mgr *Manager, cfg *config.Config, db *gorm.DB, marketSv
 
 	cc := cfg.Scheduler.Jobs.ChainScan
 	if cc.Enabled && cc.Interval > 0 && chainSvc != nil {
+		chainInterval := cc.Interval
+		if chainInterval < 30*time.Second {
+			if log != nil {
+				log.Warn("chain_scan interval too low, raised to protect upstream rpc",
+					zap.Duration("configured_interval", cc.Interval),
+					zap.Duration("effective_interval", 30*time.Second))
+			}
+			chainInterval = 30 * time.Second
+		}
 		if strings.TrimSpace(cfg.Chain.RPCURL) == "" && log != nil {
 			log.Info("register chain_scan scheduler job with skipped_no_input fallback: chain.rpc_url is empty")
 		}
 		mgr.Register(Job{
 			Name:      "chain_scan",
-			Interval:  cc.Interval,
+			Interval:  chainInterval,
 			Timeout:   cc.Timeout,
 			Immediate: cc.Immediate,
 			Run: func(ctx context.Context) (JobResult, error) {
@@ -236,25 +247,166 @@ func RegisterDefaultJobs(mgr *Manager, cfg *config.Config, db *gorm.DB, marketSv
 }
 
 func loadActiveCities(ctx context.Context, db *gorm.DB) ([]string, error) {
-	type cityRow struct {
+	type marketRow struct {
 		City string `gorm:"column:city"`
+		// Keep question for fallback extraction when city is empty.
+		Question string `gorm:"column:question"`
+		// market_type can be unknown in upstream data, so fallback cannot rely solely on this field.
+		MarketType string `gorm:"column:market_type"`
 	}
-	var rows []cityRow
+	var rows []marketRow
 	if err := db.WithContext(ctx).
 		Model(&model.Market{}).
-		Select("DISTINCT city").
+		Select("city, question, market_type").
 		Where("is_active = ?", true).
-		Where("city <> ''").
-		Order("city ASC").
+		Order("updated_at DESC").
 		Find(&rows).Error; err != nil {
 		return nil, err
 	}
+	citySet := make(map[string]struct{}, len(rows))
 	cities := make([]string, 0, len(rows))
 	for _, row := range rows {
-		city := strings.TrimSpace(row.City)
+		city := normalizeCity(row.City)
 		if city != "" {
+			if _, exists := citySet[city]; exists {
+				continue
+			}
+			citySet[city] = struct{}{}
 			cities = append(cities, city)
 		}
 	}
+	if len(cities) > 0 {
+		sort.Strings(cities)
+		return cities, nil
+	}
+
+	candidates, err := loadCityCandidates(ctx, db)
+	if err != nil {
+		return nil, err
+	}
+	for _, row := range rows {
+		if !looksLikeWeatherMarket(row.Question, row.MarketType) {
+			continue
+		}
+		q := normalizeText(row.Question)
+		for _, c := range candidates {
+			if strings.Contains(q, c.keyword) {
+				if _, exists := citySet[c.city]; exists {
+					continue
+				}
+				citySet[c.city] = struct{}{}
+				cities = append(cities, c.city)
+			}
+		}
+	}
+	sort.Strings(cities)
 	return cities, nil
+}
+
+type cityCandidate struct {
+	city    string
+	keyword string
+}
+
+func loadCityCandidates(ctx context.Context, db *gorm.DB) ([]cityCandidate, error) {
+	out := make([]cityCandidate, 0, 32)
+	seen := map[string]struct{}{}
+	add := func(city string, aliases ...string) {
+		c := normalizeCity(city)
+		if c == "" {
+			return
+		}
+		for _, alias := range append([]string{city}, aliases...) {
+			k := normalizeText(alias)
+			if k == "" || len(k) < 3 {
+				continue
+			}
+			key := c + "|" + k
+			if _, ok := seen[key]; ok {
+				continue
+			}
+			seen[key] = struct{}{}
+			out = append(out, cityCandidate{city: c, keyword: k})
+		}
+	}
+
+	// Dynamic candidates from stations preserve extensibility.
+	var stationCities []string
+	if err := db.WithContext(ctx).
+		Model(&model.WeatherStation{}).
+		Distinct("city").
+		Where("city <> ''").
+		Pluck("city", &stationCities).Error; err != nil {
+		return nil, err
+	}
+	for _, city := range stationCities {
+		add(city)
+	}
+
+	// Fallback aliases for common weather markets when station table is empty.
+	add("new york", "nyc")
+	add("chicago")
+	add("miami")
+	add("los angeles", "la")
+	add("dallas")
+	add("austin")
+	add("houston")
+	add("atlanta")
+	add("boston")
+	add("philadelphia", "philly")
+	add("washington", "washington dc", "dc")
+	add("san francisco", "sf")
+	add("seattle")
+	return out, nil
+}
+
+func looksLikeWeatherMarket(question string, marketType string) bool {
+	mt := strings.ToLower(strings.TrimSpace(marketType))
+	if strings.HasPrefix(mt, "temperature_") || strings.Contains(mt, "weather") {
+		return true
+	}
+	q := normalizeText(question)
+	return strings.Contains(q, "temperature") ||
+		strings.Contains(q, "high temp") ||
+		strings.Contains(q, "low temp") ||
+		strings.Contains(q, "weather")
+}
+
+func normalizeCity(v string) string {
+	v = normalizeText(v)
+	if v == "" {
+		return ""
+	}
+	parts := strings.Fields(v)
+	if len(parts) == 0 {
+		return ""
+	}
+	return strings.Join(parts, " ")
+}
+
+func normalizeText(v string) string {
+	v = strings.ToLower(strings.TrimSpace(v))
+	if v == "" {
+		return ""
+	}
+	r := strings.NewReplacer(
+		".", " ",
+		",", " ",
+		";", " ",
+		":", " ",
+		"/", " ",
+		"-", " ",
+		"_", " ",
+		"(", " ",
+		")", " ",
+		"[", " ",
+		"]", " ",
+		"{", " ",
+		"}", " ",
+		"?", " ",
+		"!", " ",
+		"'", " ",
+		"\"", " ",
+	)
+	return strings.Join(strings.Fields(r.Replace(v)), " ")
 }

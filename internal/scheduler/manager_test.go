@@ -2,6 +2,7 @@ package scheduler
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -149,4 +150,39 @@ func TestManagerSnapshotAndRunRecorder(t *testing.T) {
 	cancel()
 	mgr.Wait()
 	t.Fatalf("expected snapshot last status=%s", statusSkippedNoInput)
+}
+
+func TestRunWithRetrySkipsRapidRetriesOnRateLimit(t *testing.T) {
+	var attempts int32
+	runner := &jobRunner{
+		name: "chain_scan",
+		run: func(ctx context.Context) (JobResult, error) {
+			atomic.AddInt32(&attempts, 1)
+			return JobResult{}, errors.New("429 Too Many Requests")
+		},
+	}
+	_, err := runner.runWithRetry(context.Background())
+	if err == nil {
+		t.Fatalf("expected rate-limit error")
+	}
+	if got := atomic.LoadInt32(&attempts); got != 1 {
+		t.Fatalf("expected one attempt on rate-limit error, got %d", got)
+	}
+}
+
+func TestComputeJobBackoffForRateLimit(t *testing.T) {
+	base := 15 * time.Second
+	backoff1 := computeJobBackoff(base, errCodeUpstream429, 1)
+	backoff2 := computeJobBackoff(base, errCodeUpstream429, 2)
+	backoff5 := computeJobBackoff(base, errCodeUpstream429, 5)
+
+	if backoff1 < 30*time.Second {
+		t.Fatalf("expected first backoff >= 30s, got %s", backoff1)
+	}
+	if backoff2 <= backoff1 {
+		t.Fatalf("expected second backoff > first, got first=%s second=%s", backoff1, backoff2)
+	}
+	if backoff5 > 15*time.Minute {
+		t.Fatalf("expected capped backoff <= 15m, got %s", backoff5)
+	}
 }

@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"go.uber.org/zap"
@@ -43,6 +44,10 @@ func TestOpsStatusHandler(t *testing.T) {
 	}
 
 	var body struct {
+		Summary struct {
+			Degraded      bool `json:"degraded"`
+			UnhealthyJobs int  `json:"unhealthy_jobs"`
+		} `json:"summary"`
 		ConfigCheck struct {
 			ChainRPCConfigured           bool   `json:"chain_rpc_configured"`
 			AgentVertexProjectConfigured bool   `json:"agent_vertex_project_configured"`
@@ -69,6 +74,12 @@ func TestOpsStatusHandler(t *testing.T) {
 	if body.Freshness["markets"] != 12 {
 		t.Fatalf("expected markets freshness 12, got %v", body.Freshness["markets"])
 	}
+	if body.Summary.Degraded {
+		t.Fatalf("expected not degraded with empty scheduler jobs")
+	}
+	if body.Summary.UnhealthyJobs != 0 {
+		t.Fatalf("expected 0 unhealthy jobs, got %d", body.Summary.UnhealthyJobs)
+	}
 }
 
 func TestOpsStatusHandlerAuth(t *testing.T) {
@@ -91,5 +102,44 @@ func TestOpsStatusHandlerAuth(t *testing.T) {
 	r.ServeHTTP(w2, req2)
 	if w2.Code != http.StatusOK {
 		t.Fatalf("expected 200 with valid token, got %d", w2.Code)
+	}
+}
+
+func TestSummarizeSchedulerSnapshot(t *testing.T) {
+	now := time.Now().UTC()
+	s := scheduler.ManagerSnapshot{
+		Enabled: true,
+		Jobs: []scheduler.JobRuntimeSnapshot{
+			{Name: "market_sync", LastStatus: "success"},
+			{
+				Name:                "chain_scan",
+				LastStatus:          "error",
+				LastErrorCode:       "upstream_429",
+				LastErrorMessage:    "429 Too Many Requests",
+				ConsecutiveFailures: 3,
+				LastErrorAt:         &now,
+			},
+			{
+				Name:                "weather_forecast",
+				LastStatus:          "skipped_no_input",
+				LastErrorCode:       "empty_city_set",
+				LastErrorMessage:    "no active cities",
+				ConsecutiveFailures: 2,
+			},
+		},
+	}
+
+	summary := summarizeSchedulerSnapshot(s)
+	if !summary.Degraded {
+		t.Fatalf("expected degraded=true")
+	}
+	if summary.TotalJobs != 3 || summary.HealthyJobs != 1 || summary.UnhealthyJobs != 2 {
+		t.Fatalf("unexpected summary counters: %+v", summary)
+	}
+	if len(summary.Blockers) != 2 {
+		t.Fatalf("expected 2 blockers, got %d", len(summary.Blockers))
+	}
+	if summary.Blockers[0].Severity == "" || summary.Blockers[1].Severity == "" {
+		t.Fatalf("expected blockers with severity, got %+v", summary.Blockers)
 	}
 }
