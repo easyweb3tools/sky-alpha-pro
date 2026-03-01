@@ -139,7 +139,7 @@ type Competitor struct {
 type CompetitorTrade struct {
 	ID           uint64              `gorm:"column:id;primaryKey;autoIncrement"`
 	CompetitorID uint64              `gorm:"column:competitor_id;not null;index:idx_competitor_trades_comp,priority:1"`
-	MarketID     string              `gorm:"column:market_id;type:uuid;index:idx_competitor_trades_market,priority:1"`
+	MarketID     *string             `gorm:"column:market_id;type:uuid;index:idx_competitor_trades_market,priority:1"`
 	TxHash       string              `gorm:"column:tx_hash;size:66;not null;uniqueIndex"`
 	BlockNumber  uint64              `gorm:"column:block_number;not null"`
 	Side         string              `gorm:"column:side;size:10"`
