@@ -292,6 +292,16 @@ func TestScanFallsBackToRecentWindowOnRPCRangeLimit(t *testing.T) {
 	if client.filterLogCalls < 2 {
 		t.Fatalf("expected fallback path with at least 2 filter logs calls, got %d", client.filterLogCalls)
 	}
+
+	callsAfterFirst := client.filterLogCalls
+	client.latestBlock = 205
+	_, err = svc.Scan(context.Background(), ScanOptions{})
+	if err != nil {
+		t.Fatalf("second scan with learned range cap: %v", err)
+	}
+	if client.filterLogCalls != callsAfterFirst+1 {
+		t.Fatalf("expected second scan to avoid fallback retry and make one filter call, got delta=%d", client.filterLogCalls-callsAfterFirst)
+	}
 }
 
 func TestPersistObservedAllowsNullMarketID(t *testing.T) {
