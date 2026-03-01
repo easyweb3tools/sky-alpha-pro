@@ -301,9 +301,9 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("scheduler.jobs.weather_forecast.days", 7)
 	v.SetDefault("scheduler.jobs.weather_forecast.source", "all")
 	v.SetDefault("scheduler.jobs.chain_scan.enabled", true)
-	v.SetDefault("scheduler.jobs.chain_scan.interval", "2m")
+	v.SetDefault("scheduler.jobs.chain_scan.interval", "5m")
 	v.SetDefault("scheduler.jobs.chain_scan.timeout", "90s")
-	v.SetDefault("scheduler.jobs.chain_scan.immediate", true)
+	v.SetDefault("scheduler.jobs.chain_scan.immediate", false)
 	v.SetDefault("scheduler.jobs.chain_scan.lookback_blocks", uint64(0))
 	v.SetDefault("scheduler.jobs.chain_scan.max_tx", 0)
 

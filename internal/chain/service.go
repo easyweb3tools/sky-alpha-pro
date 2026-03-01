@@ -37,6 +37,7 @@ const (
 	scanRPCConcurrency          = 20
 	adaptiveWindowBlocks        = uint64(10)
 	filterLogsRetryAttempts     = 3
+	blockNumberRetryAttempts    = 4
 )
 
 var (
@@ -141,7 +142,7 @@ func (s *Service) Scan(ctx context.Context, opts ScanOptions) (*ScanResult, erro
 	started := time.Now().UTC()
 	result := &ScanResult{StartedAt: started}
 
-	latest, err := client.BlockNumber(ctx)
+	latest, err := s.blockNumberWithRetry(ctx, client)
 	if err != nil {
 		return nil, fmt.Errorf("%w: get latest block: %v", ErrChainUnavailable, err)
 	}
@@ -366,6 +367,33 @@ func (s *Service) filterLogsWithRetry(
 		}
 	}
 	return nil, lastErr
+}
+
+func (s *Service) blockNumberWithRetry(ctx context.Context, client ethClient) (uint64, error) {
+	var lastErr error
+	for attempt := 1; attempt <= blockNumberRetryAttempts; attempt++ {
+		latest, err := client.BlockNumber(ctx)
+		if err == nil {
+			return latest, nil
+		}
+		lastErr = err
+		if attempt == blockNumberRetryAttempts || !isRateLimitOrRangeError(err) {
+			break
+		}
+		factor := 1 << uint(attempt-1)
+		if factor > 8 {
+			factor = 8
+		}
+		wait := time.Duration(factor) * time.Second
+		timer := time.NewTimer(wait)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return 0, ctx.Err()
+		case <-timer.C:
+		}
+	}
+	return 0, lastErr
 }
 
 func isRateLimitOrRangeError(err error) bool {

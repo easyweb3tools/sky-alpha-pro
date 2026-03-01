@@ -20,6 +20,7 @@ const (
 	statusError          = "error"
 	statusTimeout        = "timeout"
 	statusSkippedLocked  = "skipped_locked"
+	statusSkippedBackoff = "skipped_backoff"
 	statusSkippedNoInput = "skipped_no_input"
 
 	errCodeUnknown           = "unknown_error"
@@ -102,6 +103,7 @@ type JobRuntimeSnapshot struct {
 	LastErrorCode       string     `json:"last_error_code,omitempty"`
 	LastErrorMessage    string     `json:"last_error_message,omitempty"`
 	ConsecutiveFailures int        `json:"consecutive_failures"`
+	BackoffUntil        *time.Time `json:"backoff_until,omitempty"`
 	LastDurationMS      int64      `json:"last_duration_ms"`
 }
 
@@ -143,6 +145,7 @@ type jobRuntimeState struct {
 	lastErrorCode       string
 	lastErrorMessage    string
 	consecutiveFailures int
+	backoffUntil        time.Time
 	lastDuration        time.Duration
 }
 
@@ -286,8 +289,18 @@ func (j *jobRunner) trigger(ctx context.Context) {
 	if ctx.Err() != nil {
 		return
 	}
+	now := time.Now().UTC()
+	if backoffUntil, ok := j.inBackoffWindow(now); ok {
+		j.updateNextRun(backoffUntil)
+		j.metrics.SetJobNextRun(j.name, backoffUntil)
+		if j.log != nil {
+			j.log.Debug("scheduler job skipped due active backoff",
+				zap.String("job", j.name),
+				zap.Time("backoff_until", backoffUntil))
+		}
+		return
+	}
 	if !j.mu.TryLock() {
-		now := time.Now().UTC()
 		j.finishRun(now, now, statusSkippedLocked, "", "", JobResult{}, nil)
 		return
 	}
@@ -413,7 +426,12 @@ func (j *jobRunner) runWithRetry(ctx context.Context) (JobResult, error) {
 			return result, nil
 		}
 		lastErr = err
+		code := classifyErrorCode(err)
 		if attempt == defaultRetryAttempts || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			break
+		}
+		if code == errCodeUpstream429 || code == errCodeRPCRange {
+			// Avoid hammering upstream when already rate-limited.
 			break
 		}
 		wait := backoff
@@ -474,6 +492,7 @@ func (j *jobRunner) updateStateAfterRun(status, code, message string, finished t
 		j.state.consecutiveFailures = 0
 		j.state.lastErrorCode = ""
 		j.state.lastErrorMessage = ""
+		j.state.backoffUntil = time.Time{}
 		return
 	}
 	if status == statusError || status == statusTimeout {
@@ -481,6 +500,11 @@ func (j *jobRunner) updateStateAfterRun(status, code, message string, finished t
 		j.state.lastErrorCode = code
 		j.state.lastErrorMessage = message
 		j.state.consecutiveFailures++
+		if delay := computeJobBackoff(j.interval, code, j.state.consecutiveFailures); delay > 0 {
+			j.state.backoffUntil = finished.Add(delay)
+		} else {
+			j.state.backoffUntil = time.Time{}
+		}
 		return
 	}
 	if status == statusSkippedNoInput {
@@ -488,6 +512,11 @@ func (j *jobRunner) updateStateAfterRun(status, code, message string, finished t
 		j.state.lastErrorCode = code
 		j.state.lastErrorMessage = message
 		j.state.consecutiveFailures++
+		j.state.backoffUntil = time.Time{}
+		return
+	}
+	if status == statusSkippedLocked {
+		j.state.backoffUntil = time.Time{}
 	}
 }
 
@@ -518,7 +547,20 @@ func (j *jobRunner) snapshot() JobRuntimeSnapshot {
 		v := j.state.lastErrorAt
 		s.LastErrorAt = &v
 	}
+	if !j.state.backoffUntil.IsZero() {
+		v := j.state.backoffUntil
+		s.BackoffUntil = &v
+	}
 	return s
+}
+
+func (j *jobRunner) inBackoffWindow(now time.Time) (time.Time, bool) {
+	j.stateMu.RLock()
+	defer j.stateMu.RUnlock()
+	if j.state.backoffUntil.IsZero() || !now.Before(j.state.backoffUntil) {
+		return time.Time{}, false
+	}
+	return j.state.backoffUntil, true
 }
 
 func (j *jobRunner) recordRun(ctx context.Context, rec RunRecord) {
@@ -608,4 +650,44 @@ func classifySkipReason(reason string) string {
 	default:
 		return errCodeSkippedNoInput
 	}
+}
+
+func computeJobBackoff(interval time.Duration, code string, consecutiveFailures int) time.Duration {
+	if consecutiveFailures <= 0 {
+		return 0
+	}
+	base := interval
+	if base <= 0 {
+		base = 30 * time.Second
+	}
+	switch code {
+	case errCodeUpstream429, errCodeRPCRange:
+		if base < 30*time.Second {
+			base = 30 * time.Second
+		}
+		return boundedExponentialBackoff(base, consecutiveFailures, 15*time.Minute)
+	case errCodeUpstream5xx:
+		if base < 15*time.Second {
+			base = 15 * time.Second
+		}
+		return boundedExponentialBackoff(base, consecutiveFailures, 5*time.Minute)
+	default:
+		return 0
+	}
+}
+
+func boundedExponentialBackoff(base time.Duration, consecutiveFailures int, max time.Duration) time.Duration {
+	factor := 1
+	if consecutiveFailures > 1 {
+		shift := consecutiveFailures - 1
+		if shift > 6 {
+			shift = 6
+		}
+		factor = 1 << shift
+	}
+	delay := time.Duration(factor) * base
+	if delay > max {
+		return max
+	}
+	return delay
 }

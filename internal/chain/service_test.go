@@ -26,17 +26,26 @@ import (
 )
 
 type mockEthClient struct {
-	latestBlock    uint64
-	logs           []ethtypes.Log
-	txs            map[common.Hash]*ethtypes.Transaction
-	headers        map[uint64]*ethtypes.Header
-	blockNumberErr error
-	filterLogsErr  error
-	maxLogRange    uint64
-	filterLogCalls int
+	latestBlock     uint64
+	logs            []ethtypes.Log
+	txs             map[common.Hash]*ethtypes.Transaction
+	headers         map[uint64]*ethtypes.Header
+	blockNumberErr  error
+	blockNumberErrs []error
+	filterLogsErr   error
+	maxLogRange     uint64
+	filterLogCalls  int
 }
 
 func (m *mockEthClient) BlockNumber(context.Context) (uint64, error) {
+	if len(m.blockNumberErrs) > 0 {
+		err := m.blockNumberErrs[0]
+		m.blockNumberErrs = m.blockNumberErrs[1:]
+		if err != nil {
+			return 0, err
+		}
+		return m.latestBlock, nil
+	}
 	if m.blockNumberErr != nil {
 		return 0, m.blockNumberErr
 	}
@@ -231,6 +240,32 @@ func TestScanBlockNumberError(t *testing.T) {
 	}
 	if !errors.Is(err, ErrChainUnavailable) {
 		t.Fatalf("expected ErrChainUnavailable, got %v", err)
+	}
+}
+
+func TestScanBlockNumberRetriesOnRateLimit(t *testing.T) {
+	db := setupChainTestDB(t)
+	client := &mockEthClient{
+		latestBlock: 200,
+		blockNumberErrs: []error{
+			errors.New("429 Too Many Requests"),
+			nil,
+		},
+	}
+	svc := newServiceWithClient(config.ChainConfig{
+		RPCURL:                 "http://mock",
+		ChainID:                137,
+		CTFExchangeAddress:     "0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E",
+		NegRiskExchangeAddress: "0xC5d563A36AE78145C45a50134d48A1215220f80a",
+		ScanLookbackBlocks:     10,
+	}, db, zap.NewNop(), client)
+
+	res, err := svc.Scan(context.Background(), ScanOptions{})
+	if err != nil {
+		t.Fatalf("scan with transient 429: %v", err)
+	}
+	if res.ToBlock != 200 {
+		t.Fatalf("expected to_block=200 after retry, got %d", res.ToBlock)
 	}
 }
 
