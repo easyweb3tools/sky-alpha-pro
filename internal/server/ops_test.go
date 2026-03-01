@@ -26,6 +26,7 @@ func TestOpsStatusHandler(t *testing.T) {
 	cfg.Agent.VertexProject = "project-1"
 	cfg.Weather.VisualCrossingAPIKey = "k1"
 	cfg.Scheduler.Enabled = true
+	cfg.Scheduler.Jobs.ChainScan.Interval = 60 * time.Second
 
 	reg := metrics.New(cfg.Metrics)
 	reg.SetDataFreshness("markets", 12)
@@ -53,6 +54,8 @@ func TestOpsStatusHandler(t *testing.T) {
 			AgentVertexProjectConfigured bool   `json:"agent_vertex_project_configured"`
 			VisualCrossingKeyConfigured  bool   `json:"visualcrossing_key_configured"`
 			ChainScanLookbackBlocks      uint64 `json:"chain_scan_lookback_blocks"`
+			ChainScanConfiguredIntervalS int64  `json:"chain_scan_configured_interval_seconds"`
+			ChainScanEffectiveIntervalS  int64  `json:"chain_scan_effective_interval_seconds"`
 		} `json:"config_check"`
 		Freshness map[string]float64 `json:"freshness"`
 	}
@@ -70,6 +73,12 @@ func TestOpsStatusHandler(t *testing.T) {
 	}
 	if body.ConfigCheck.ChainScanLookbackBlocks != 20 {
 		t.Fatalf("expected chain lookback blocks 20, got %d", body.ConfigCheck.ChainScanLookbackBlocks)
+	}
+	if body.ConfigCheck.ChainScanConfiguredIntervalS != 60 {
+		t.Fatalf("expected configured chain scan interval 60s, got %d", body.ConfigCheck.ChainScanConfiguredIntervalS)
+	}
+	if body.ConfigCheck.ChainScanEffectiveIntervalS != 0 {
+		t.Fatalf("expected effective interval 0 without registered chain job, got %d", body.ConfigCheck.ChainScanEffectiveIntervalS)
 	}
 	if body.Freshness["markets"] != 12 {
 		t.Fatalf("expected markets freshness 12, got %v", body.Freshness["markets"])

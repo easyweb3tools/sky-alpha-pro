@@ -81,7 +81,7 @@ func TestLoadActiveCitiesFallsBackToQuestionParsing(t *testing.T) {
 	if err := db.Exec(`
 		INSERT INTO markets(id, city, question, market_type, is_active, updated_at) VALUES
 		('m1', '', 'Will NYC high temperature exceed 55F tomorrow?', 'unknown', 1, CURRENT_TIMESTAMP),
-		('m2', '', 'Will Chicago low temp be below 20F?', 'unknown', 1, CURRENT_TIMESTAMP)
+		('m2', '', 'Will Chicago be above 20F?', 'unknown', 1, CURRENT_TIMESTAMP)
 	`).Error; err != nil {
 		t.Fatalf("seed markets: %v", err)
 	}

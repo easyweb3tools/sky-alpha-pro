@@ -367,8 +367,13 @@ func (j *jobRunner) finishRun(start, finished time.Time, status, code, message s
 	for _, issue := range result.Errors {
 		j.metrics.AddJobError(j.name, issue.Code, issue.Count)
 	}
-	if (status == statusError || status == statusTimeout || status == statusSkippedNoInput) && code != "" {
-		j.metrics.AddJobError(j.name, code, 1)
+	// Always emit at least one structured error for hard failures, even when job result has no issue list.
+	if status == statusError || status == statusTimeout {
+		emitCode := strings.TrimSpace(code)
+		if emitCode == "" {
+			emitCode = errCodeUnknown
+		}
+		j.metrics.AddJobError(j.name, emitCode, 1)
 	}
 
 	meta := map[string]any{
