@@ -23,6 +23,7 @@ import (
 )
 
 var thresholdPattern = regexp.MustCompile(`(?i)(?:above|below|over|under|exceed|at least|at most|no more than|no less than)[^0-9-]{0,24}(-?\d+(?:\.\d+)?)\s*°?\s*([FC])?`)
+var thresholdLoosePattern = regexp.MustCompile(`(?i)(-?\d+(?:\.\d+)?)\s*°?\s*([FC])`)
 
 type Service struct {
 	cfg          config.SignalConfig
@@ -697,21 +698,33 @@ func buildReasoning(city string, thresholdF float64, targetDate time.Time, value
 
 func parseThresholdFahrenheit(question string) (float64, bool) {
 	matches := thresholdPattern.FindStringSubmatch(question)
-	if len(matches) < 2 {
-		return 0, false
+	if len(matches) >= 2 {
+		value, err := strconvParseFloat(matches[1])
+		if err == nil {
+			unit := "F"
+			if len(matches) >= 3 && strings.TrimSpace(matches[2]) != "" {
+				unit = strings.ToUpper(matches[2])
+			}
+			if unit == "C" {
+				value = (value * 9.0 / 5.0) + 32.0
+			}
+			return value, true
+		}
 	}
-	value, err := strconvParseFloat(matches[1])
-	if err != nil {
-		return 0, false
+
+	loose := thresholdLoosePattern.FindStringSubmatch(question)
+	if len(loose) >= 3 {
+		value, err := strconvParseFloat(loose[1])
+		if err != nil {
+			return 0, false
+		}
+		unit := strings.ToUpper(strings.TrimSpace(loose[2]))
+		if unit == "C" {
+			value = (value * 9.0 / 5.0) + 32.0
+		}
+		return value, true
 	}
-	unit := "F"
-	if len(matches) >= 3 && strings.TrimSpace(matches[2]) != "" {
-		unit = strings.ToUpper(matches[2])
-	}
-	if unit == "C" {
-		value = (value * 9.0 / 5.0) + 32.0
-	}
-	return value, true
+	return 0, false
 }
 
 func resolveMarketType(raw string, comparator string, question string) string {
@@ -728,9 +741,9 @@ func resolveMarketType(raw string, comparator string, question string) string {
 	}
 	q := strings.ToLower(question)
 	switch {
-	case strings.Contains(q, "high temperature"), strings.Contains(q, "high temp"), strings.Contains(q, "above"), strings.Contains(q, "exceed"):
+	case strings.Contains(q, "high temperature"), strings.Contains(q, "high temp"), strings.Contains(q, "above"), strings.Contains(q, "exceed"), strings.Contains(q, "higher"), strings.Contains(q, "at or above"):
 		return "temperature_high"
-	case strings.Contains(q, "low temperature"), strings.Contains(q, "low temp"), strings.Contains(q, "below"), strings.Contains(q, "under"):
+	case strings.Contains(q, "low temperature"), strings.Contains(q, "low temp"), strings.Contains(q, "below"), strings.Contains(q, "under"), strings.Contains(q, "lower"), strings.Contains(q, "at or below"):
 		return "temperature_low"
 	default:
 		return ""

@@ -25,6 +25,7 @@ import (
 const defaultSyncConcurrency = 10
 
 var marketThresholdPattern = regexp.MustCompile(`(?i)(?:above|below|over|under|exceed|at least|at most|no more than|no less than)[^0-9-]{0,24}(-?\d+(?:\.\d+)?)\s*°?\s*([FC])?`)
+var marketLooseThresholdPattern = regexp.MustCompile(`(?i)(-?\d+(?:\.\d+)?)\s*°?\s*([FC])`)
 
 type Service struct {
 	cfg   config.MarketConfig
@@ -452,29 +453,41 @@ func nullDecimalFromFloat(v float64) decimal.NullDecimal {
 
 func parseQuestionThresholdF(question string) (float64, bool) {
 	matches := marketThresholdPattern.FindStringSubmatch(question)
-	if len(matches) < 2 {
-		return 0, false
+	if len(matches) >= 2 {
+		value, err := strconv.ParseFloat(strings.TrimSpace(matches[1]), 64)
+		if err == nil {
+			unit := "F"
+			if len(matches) >= 3 && strings.TrimSpace(matches[2]) != "" {
+				unit = strings.ToUpper(strings.TrimSpace(matches[2]))
+			}
+			if unit == "C" {
+				value = (value * 9.0 / 5.0) + 32.0
+			}
+			return value, true
+		}
 	}
-	value, err := strconv.ParseFloat(strings.TrimSpace(matches[1]), 64)
-	if err != nil {
-		return 0, false
+
+	loose := marketLooseThresholdPattern.FindStringSubmatch(question)
+	if len(loose) >= 3 {
+		value, err := strconv.ParseFloat(strings.TrimSpace(loose[1]), 64)
+		if err != nil {
+			return 0, false
+		}
+		unit := strings.ToUpper(strings.TrimSpace(loose[2]))
+		if unit == "C" {
+			value = (value * 9.0 / 5.0) + 32.0
+		}
+		return value, true
 	}
-	unit := "F"
-	if len(matches) >= 3 && strings.TrimSpace(matches[2]) != "" {
-		unit = strings.ToUpper(strings.TrimSpace(matches[2]))
-	}
-	if unit == "C" {
-		value = (value * 9.0 / 5.0) + 32.0
-	}
-	return value, true
+	return 0, false
 }
 
 func inferComparator(question string, marketType string) string {
 	q := strings.ToLower(question)
 	switch {
-	case strings.Contains(q, "below"), strings.Contains(q, "under"), strings.Contains(q, "at most"), strings.Contains(q, "no more than"):
+	case strings.Contains(q, "below"), strings.Contains(q, "under"), strings.Contains(q, "at most"), strings.Contains(q, "no more than"), strings.Contains(q, "lower"), strings.Contains(q, "at or below"):
 		return "le"
-	case strings.Contains(q, "above"), strings.Contains(q, "exceed"), strings.Contains(q, "at least"), strings.Contains(q, "no less than"):
+	case strings.Contains(q, "above"), strings.Contains(q, "exceed"), strings.Contains(q, "at least"), strings.Contains(q, "no less than"), strings.Contains(q, "higher"), strings.Contains(q, "at or above"):
 		return "ge"
 	}
 	switch marketType {
