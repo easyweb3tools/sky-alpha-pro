@@ -6,12 +6,14 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"math/rand"
 	"os"
 	"strings"
 	"sync"
 	"time"
 
 	"go.uber.org/zap"
+	"golang.org/x/sync/singleflight"
 	"google.golang.org/genai"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
@@ -20,11 +22,17 @@ import (
 )
 
 type cityResolver struct {
-	db       *gorm.DB
-	log      *zap.Logger
-	vertex   *cityVertexClient
-	cacheMu  sync.RWMutex
-	memCache map[string]string
+	db         *gorm.DB
+	log        *zap.Logger
+	vertex     *cityVertexClient
+	cacheMu    sync.RWMutex
+	memCache   map[string]string
+	failMu     sync.RWMutex
+	failUntil  map[string]time.Time
+	sf         singleflight.Group
+	vertexSem  chan struct{}
+	rateMu     sync.Mutex
+	nextVertex time.Time
 }
 
 type cityVertexClient struct {
@@ -35,10 +43,12 @@ type cityVertexClient struct {
 
 func newCityResolver(db *gorm.DB, log *zap.Logger) *cityResolver {
 	return &cityResolver{
-		db:       db,
-		log:      log,
-		vertex:   newCityVertexClient(log),
-		memCache: make(map[string]string, 256),
+		db:        db,
+		log:       log,
+		vertex:    newCityVertexClient(log),
+		memCache:  make(map[string]string, 256),
+		failUntil: make(map[string]time.Time, 256),
+		vertexSem: make(chan struct{}, 2),
 	}
 }
 
@@ -66,20 +76,134 @@ func (r *cityResolver) Resolve(ctx context.Context, m model.Market, knownCities 
 	if r.vertex == nil {
 		return ""
 	}
-	city, err := r.vertex.ResolveCity(ctx, m.Question, m.Slug)
+	if !r.allowVertex(key) {
+		return ""
+	}
+	v, err, _ := r.sf.Do(key, func() (any, error) {
+		city, err := r.resolveCityByVertexWithRetry(ctx, m.Question, m.Slug)
+		if err != nil {
+			return "", err
+		}
+		return city, nil
+	})
 	if err != nil {
 		if r.log != nil {
 			r.log.Warn("vertex city resolve failed", zap.Error(err))
 		}
+		r.markVertexFailed(key)
 		return ""
 	}
+	city, _ := v.(string)
 	city = normalizeCityToken(city)
 	if city == "" {
+		r.markVertexFailed(key)
 		return ""
 	}
+	r.clearVertexFailed(key)
 	r.persistCache(ctx, key, m.Question, m.Slug, city, "vertex_ai")
 	r.storeMem(key, city)
 	return city
+}
+
+func (r *cityResolver) resolveCityByVertexWithRetry(ctx context.Context, question string, slug string) (string, error) {
+	var lastErr error
+	backoff := 350 * time.Millisecond
+	for attempt := 1; attempt <= 3; attempt++ {
+		if err := r.acquireVertexSlot(ctx); err != nil {
+			return "", err
+		}
+		city, err := r.vertex.ResolveCity(ctx, question, slug)
+		r.releaseVertexSlot()
+		if err == nil {
+			return city, nil
+		}
+		lastErr = err
+		if !isRetryableVertexErr(err) || attempt == 3 {
+			break
+		}
+		sleep := backoff + time.Duration(rand.Intn(250))*time.Millisecond
+		select {
+		case <-ctx.Done():
+			return "", ctx.Err()
+		case <-time.After(sleep):
+		}
+		backoff *= 2
+	}
+	return "", lastErr
+}
+
+func isRetryableVertexErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "resource_exhausted") ||
+		strings.Contains(msg, "deadline_exceeded") ||
+		strings.Contains(msg, "429") ||
+		strings.Contains(msg, "504") ||
+		strings.Contains(msg, "too many requests")
+}
+
+func (r *cityResolver) allowVertex(key string) bool {
+	if key == "" {
+		return true
+	}
+	r.failMu.RLock()
+	defer r.failMu.RUnlock()
+	until, ok := r.failUntil[key]
+	return !ok || time.Now().UTC().After(until)
+}
+
+func (r *cityResolver) markVertexFailed(key string) {
+	if key == "" {
+		return
+	}
+	r.failMu.Lock()
+	defer r.failMu.Unlock()
+	r.failUntil[key] = time.Now().UTC().Add(5 * time.Minute)
+}
+
+func (r *cityResolver) clearVertexFailed(key string) {
+	if key == "" {
+		return
+	}
+	r.failMu.Lock()
+	defer r.failMu.Unlock()
+	delete(r.failUntil, key)
+}
+
+func (r *cityResolver) acquireVertexSlot(ctx context.Context) error {
+	select {
+	case r.vertexSem <- struct{}{}:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+
+	r.rateMu.Lock()
+	now := time.Now().UTC()
+	if r.nextVertex.IsZero() || now.After(r.nextVertex) {
+		r.nextVertex = now
+	}
+	wait := time.Until(r.nextVertex)
+	r.nextVertex = r.nextVertex.Add(400 * time.Millisecond)
+	r.rateMu.Unlock()
+
+	if wait > 0 {
+		select {
+		case <-ctx.Done():
+			r.releaseVertexSlot()
+			return ctx.Err()
+		case <-time.After(wait):
+		}
+	}
+	return nil
+}
+
+func (r *cityResolver) releaseVertexSlot() {
+	select {
+	case <-r.vertexSem:
+	default:
+	}
 }
 
 func (r *cityResolver) resolveByRules(m model.Market, knownCities []string) string {
