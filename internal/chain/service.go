@@ -52,6 +52,7 @@ var (
 
 type ethClient interface {
 	BlockNumber(ctx context.Context) (uint64, error)
+	BlockByNumber(ctx context.Context, number *big.Int) (*ethtypes.Block, error)
 	FilterLogs(ctx context.Context, q ethereum.FilterQuery) ([]ethtypes.Log, error)
 	TransactionByHash(ctx context.Context, hash common.Hash) (*ethtypes.Transaction, bool, error)
 	HeaderByNumber(ctx context.Context, number *big.Int) (*ethtypes.Header, error)
@@ -459,10 +460,71 @@ func (s *Service) fetchTxMetaConcurrently(
 ) map[common.Hash]txMeta {
 	metas := make(map[common.Hash]txMeta, len(hashes))
 	var metasMu sync.Mutex
+	target := make(map[common.Hash]struct{}, len(hashes))
+	for _, h := range hashes {
+		target[h] = struct{}{}
+	}
+
+	blockSet := make(map[uint64]struct{}, len(logBlockByHash))
+	for _, b := range logBlockByHash {
+		blockSet[b] = struct{}{}
+	}
+	blockNumbers := make([]uint64, 0, len(blockSet))
+	for b := range blockSet {
+		blockNumbers = append(blockNumbers, b)
+	}
+
+	g, gctx := errgroup.WithContext(ctx)
+	g.SetLimit(scanRPCConcurrency)
+	for _, blockNumber := range blockNumbers {
+		bn := blockNumber
+		g.Go(func() error {
+			start := time.Now()
+			blk, err := client.BlockByNumber(gctx, new(big.Int).SetUint64(bn))
+			s.observeRPC("eth_getBlockByNumber", start, err)
+			if err != nil || blk == nil {
+				return nil
+			}
+			ts := time.Unix(int64(blk.Time()), 0).UTC()
+			for _, tx := range blk.Transactions() {
+				h := tx.Hash()
+				if _, ok := target[h]; !ok {
+					continue
+				}
+				sender, err := ethtypes.Sender(signer, tx)
+				if err != nil || sender == (common.Address{}) {
+					continue
+				}
+				gasPriceGwei := decimal.Zero
+				if gp := tx.GasPrice(); gp != nil {
+					gasPriceGwei = decimal.NewFromBigInt(gp, 0).Div(decimal.NewFromInt(1_000_000_000))
+				}
+				metasMu.Lock()
+				metas[h] = txMeta{
+					Sender:       strings.ToLower(sender.Hex()),
+					Timestamp:    ts,
+					GasPriceGwei: gasPriceGwei,
+				}
+				metasMu.Unlock()
+			}
+			return nil
+		})
+	}
+	_ = g.Wait()
+
+	// Fallback for hashes missing from full-block path (provider gaps/reorg edge cases).
+	missing := make([]common.Hash, 0, len(hashes))
+	for _, h := range hashes {
+		if _, ok := metas[h]; !ok {
+			missing = append(missing, h)
+		}
+	}
+	if len(missing) == 0 {
+		return metas
+	}
 
 	headers := make(map[uint64]*ethtypes.Header)
 	var headersMu sync.Mutex
-
 	fetchHeader := func(blockNumber uint64, gctx context.Context) (*ethtypes.Header, error) {
 		headersMu.Lock()
 		cached := headers[blockNumber]
@@ -473,11 +535,8 @@ func (s *Service) fetchTxMetaConcurrently(
 		start := time.Now()
 		head, err := client.HeaderByNumber(gctx, new(big.Int).SetUint64(blockNumber))
 		s.observeRPC("eth_getBlockByNumber", start, err)
-		if err != nil {
+		if err != nil || head == nil {
 			return nil, err
-		}
-		if head == nil {
-			return nil, nil
 		}
 		headersMu.Lock()
 		if existing := headers[blockNumber]; existing == nil {
@@ -489,15 +548,14 @@ func (s *Service) fetchTxMetaConcurrently(
 		return head, nil
 	}
 
-	g, gctx := errgroup.WithContext(ctx)
-	g.SetLimit(scanRPCConcurrency)
-
-	for _, hash := range hashes {
+	fg, fgctx := errgroup.WithContext(ctx)
+	fg.SetLimit(6)
+	for _, hash := range missing {
 		h := hash
 		blockNumber := logBlockByHash[h]
-		g.Go(func() error {
+		fg.Go(func() error {
 			start := time.Now()
-			tx, pending, err := client.TransactionByHash(gctx, h)
+			tx, pending, err := client.TransactionByHash(fgctx, h)
 			s.observeRPC("eth_getTransactionByHash", start, err)
 			if err != nil || pending || tx == nil {
 				return nil
@@ -506,16 +564,14 @@ func (s *Service) fetchTxMetaConcurrently(
 			if err != nil || sender == (common.Address{}) {
 				return nil
 			}
-			head, err := fetchHeader(blockNumber, gctx)
+			head, err := fetchHeader(blockNumber, fgctx)
 			if err != nil || head == nil {
 				return nil
 			}
-
 			gasPriceGwei := decimal.Zero
 			if gp := tx.GasPrice(); gp != nil {
 				gasPriceGwei = decimal.NewFromBigInt(gp, 0).Div(decimal.NewFromInt(1_000_000_000))
 			}
-
 			metasMu.Lock()
 			metas[h] = txMeta{
 				Sender:       strings.ToLower(sender.Hex()),
@@ -526,7 +582,7 @@ func (s *Service) fetchTxMetaConcurrently(
 			return nil
 		})
 	}
-	_ = g.Wait()
+	_ = fg.Wait()
 	return metas
 }
 
@@ -826,7 +882,8 @@ func (s *Service) refreshCompetitorStats(
 
 	batch := make([]model.CompetitorTrade, 0, 200)
 	if err := tx.Model(&model.CompetitorTrade{}).
-		Select("timestamp", "amount_usdc").
+		// FindInBatches relies on primary key pagination; include id to avoid "primary key required".
+		Select("id", "timestamp", "amount_usdc").
 		Where("competitor_id = ?", competitor.ID).
 		Order("timestamp ASC").
 		FindInBatches(&batch, 200, func(_ *gorm.DB, _ int) error {

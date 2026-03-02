@@ -18,6 +18,7 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	ethtypes "github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/crypto"
+	"github.com/shopspring/decimal"
 	"go.uber.org/zap"
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
@@ -33,6 +34,7 @@ type mockEthClient struct {
 	logs            []ethtypes.Log
 	txs             map[common.Hash]*ethtypes.Transaction
 	headers         map[uint64]*ethtypes.Header
+	blocks          map[uint64]*ethtypes.Block
 	blockNumberErr  error
 	blockNumberErrs []error
 	filterLogsErr   error
@@ -105,6 +107,13 @@ func (m *mockEthClient) FilterLogs(_ context.Context, q ethereum.FilterQuery) ([
 		out = append(out, lg)
 	}
 	return out, nil
+}
+
+func (m *mockEthClient) BlockByNumber(_ context.Context, number *big.Int) (*ethtypes.Block, error) {
+	if m.blocks == nil {
+		return nil, nil
+	}
+	return m.blocks[number.Uint64()], nil
 }
 
 func (m *mockEthClient) TransactionByHash(_ context.Context, hash common.Hash) (*ethtypes.Transaction, bool, error) {
@@ -338,6 +347,61 @@ func TestPersistObservedAllowsNullMarketID(t *testing.T) {
 	}
 }
 
+func TestRefreshCompetitorStatsDoesNotRequirePrimaryKeyInSelect(t *testing.T) {
+	db := setupChainTestDB(t)
+	svc := newServiceWithClient(config.ChainConfig{}, db, zap.NewNop(), &mockEthClient{})
+	now := time.Date(2026, 3, 1, 12, 0, 0, 0, time.UTC)
+
+	competitor := model.Competitor{
+		Address:   "0xabc0000000000000000000000000000000000001",
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+	if err := db.Create(&competitor).Error; err != nil {
+		t.Fatalf("create competitor: %v", err)
+	}
+
+	t1 := now.Add(-2 * time.Minute)
+	t2 := now.Add(-1 * time.Minute)
+	amt1 := decimal.NewFromFloat(12.5)
+	amt2 := decimal.NewFromFloat(7.5)
+	if err := db.Create(&model.CompetitorTrade{
+		CompetitorID: competitor.ID,
+		TxHash:       "0xaaa",
+		BlockNumber:  1,
+		Timestamp:    t1,
+		AmountUSDC:   decimal.NewNullDecimal(amt1),
+		CreatedAt:    now,
+	}).Error; err != nil {
+		t.Fatalf("create trade1: %v", err)
+	}
+	if err := db.Create(&model.CompetitorTrade{
+		CompetitorID: competitor.ID,
+		TxHash:       "0xbbb",
+		BlockNumber:  2,
+		Timestamp:    t2,
+		AmountUSDC:   decimal.NewNullDecimal(amt2),
+		CreatedAt:    now,
+	}).Error; err != nil {
+		t.Fatalf("create trade2: %v", err)
+	}
+
+	if err := svc.refreshCompetitorStats(db, competitor.Address, now, 2, 120); err != nil {
+		t.Fatalf("refresh competitor stats: %v", err)
+	}
+
+	var got model.Competitor
+	if err := db.Where("id = ?", competitor.ID).First(&got).Error; err != nil {
+		t.Fatalf("load competitor: %v", err)
+	}
+	if got.TotalTrades != 2 {
+		t.Fatalf("expected total trades=2, got %d", got.TotalTrades)
+	}
+	if !got.TotalVolume.Valid || !got.TotalVolume.Decimal.Equal(amt1.Add(amt2)) {
+		t.Fatalf("unexpected total volume: %+v", got.TotalVolume)
+	}
+}
+
 func TestScanEmitsChainRPCMetrics(t *testing.T) {
 	db := setupChainTestDB(t)
 	client, _ := buildMockEthClient(t)
@@ -368,7 +432,7 @@ func TestScanEmitsChainRPCMetrics(t *testing.T) {
 	if !strings.Contains(text, `sky_alpha_chain_rpc_requests_total{method="eth_getLogs",status="ok"}`) {
 		t.Fatalf("missing eth_getLogs rpc request metric: %s", text)
 	}
-	if !strings.Contains(text, `sky_alpha_chain_rpc_requests_per_second{method="eth_getTransactionByHash",status="ok"}`) {
+	if !strings.Contains(text, `sky_alpha_chain_rpc_requests_per_second{method="eth_getBlockByNumber",status="ok"}`) {
 		t.Fatalf("missing per-second rpc metric: %s", text)
 	}
 }
@@ -429,6 +493,12 @@ func buildMockEthClient(t *testing.T) (*mockEthClient, string) {
 		102: {Number: new(big.Int).SetUint64(102), Time: uint64(time.Date(2026, 1, 1, 0, 0, 8, 0, time.UTC).Unix())},
 		160: {Number: new(big.Int).SetUint64(160), Time: uint64(time.Date(2026, 1, 1, 0, 10, 0, 0, time.UTC).Unix())},
 	}
+	blocks := map[uint64]*ethtypes.Block{
+		100: ethtypes.NewBlockWithHeader(headers[100]).WithBody(ethtypes.Body{Transactions: []*ethtypes.Transaction{tx1}}),
+		101: ethtypes.NewBlockWithHeader(headers[101]).WithBody(ethtypes.Body{Transactions: []*ethtypes.Transaction{tx2}}),
+		102: ethtypes.NewBlockWithHeader(headers[102]).WithBody(ethtypes.Body{Transactions: []*ethtypes.Transaction{tx3}}),
+		160: ethtypes.NewBlockWithHeader(headers[160]).WithBody(ethtypes.Body{Transactions: []*ethtypes.Transaction{tx4}}),
+	}
 
 	irrelevantTopic := crypto.Keccak256Hash([]byte("Approval(address,address,uint256)"))
 
@@ -448,6 +518,7 @@ func buildMockEthClient(t *testing.T) (*mockEthClient, string) {
 			tx4.Hash(): tx4,
 		},
 		headers: headers,
+		blocks:  blocks,
 	}, botAddr
 }
 
