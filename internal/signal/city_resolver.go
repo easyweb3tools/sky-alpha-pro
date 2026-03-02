@@ -33,6 +33,8 @@ type cityResolver struct {
 	vertexSem  chan struct{}
 	rateMu     sync.Mutex
 	nextVertex time.Time
+	globalMu   sync.RWMutex
+	globalOff  time.Time
 }
 
 type cityVertexClient struct {
@@ -63,7 +65,9 @@ func (r *cityResolver) Resolve(ctx context.Context, m model.Market, knownCities 
 	if city := r.loadMem(key); city != "" {
 		return city
 	}
-	if city := r.loadDBCache(ctx, key); city != "" {
+	if city, blocked := r.loadDBCache(ctx, key); blocked {
+		return ""
+	} else if city != "" {
 		r.storeMem(key, city)
 		return city
 	}
@@ -76,7 +80,7 @@ func (r *cityResolver) Resolve(ctx context.Context, m model.Market, knownCities 
 	if r.vertex == nil {
 		return ""
 	}
-	if !r.allowVertex(key) {
+	if !r.allowVertex(key) || !r.allowGlobalVertex() {
 		return ""
 	}
 	v, err, _ := r.sf.Do(key, func() (any, error) {
@@ -91,6 +95,12 @@ func (r *cityResolver) Resolve(ctx context.Context, m model.Market, knownCities 
 			r.log.Warn("vertex city resolve failed", zap.Error(err))
 		}
 		r.markVertexFailed(key)
+		if isRateLimitVertexErr(err) {
+			r.markGlobalVertexBackoff(10 * time.Minute)
+			r.persistNegativeCache(ctx, key, m.Question, m.Slug, "vertex_rate_limited")
+		} else {
+			r.persistNegativeCache(ctx, key, m.Question, m.Slug, "vertex_failed")
+		}
 		return ""
 	}
 	city, _ := v.(string)
@@ -107,8 +117,8 @@ func (r *cityResolver) Resolve(ctx context.Context, m model.Market, knownCities 
 
 func (r *cityResolver) resolveCityByVertexWithRetry(ctx context.Context, question string, slug string) (string, error) {
 	var lastErr error
-	backoff := 350 * time.Millisecond
-	for attempt := 1; attempt <= 3; attempt++ {
+	backoff := 900 * time.Millisecond
+	for attempt := 1; attempt <= 2; attempt++ {
 		if err := r.acquireVertexSlot(ctx); err != nil {
 			return "", err
 		}
@@ -118,7 +128,7 @@ func (r *cityResolver) resolveCityByVertexWithRetry(ctx context.Context, questio
 			return city, nil
 		}
 		lastErr = err
-		if !isRetryableVertexErr(err) || attempt == 3 {
+		if !isRetryableVertexErr(err) || attempt == 2 {
 			break
 		}
 		sleep := backoff + time.Duration(rand.Intn(250))*time.Millisecond
@@ -140,7 +150,19 @@ func isRetryableVertexErr(err error) bool {
 	return strings.Contains(msg, "resource_exhausted") ||
 		strings.Contains(msg, "deadline_exceeded") ||
 		strings.Contains(msg, "429") ||
+		strings.Contains(msg, "502") ||
 		strings.Contains(msg, "504") ||
+		strings.Contains(msg, "bad gateway") ||
+		strings.Contains(msg, "too many requests")
+}
+
+func isRateLimitVertexErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "resource_exhausted") ||
+		strings.Contains(msg, "429") ||
 		strings.Contains(msg, "too many requests")
 }
 
@@ -170,6 +192,24 @@ func (r *cityResolver) clearVertexFailed(key string) {
 	r.failMu.Lock()
 	defer r.failMu.Unlock()
 	delete(r.failUntil, key)
+}
+
+func (r *cityResolver) allowGlobalVertex() bool {
+	r.globalMu.RLock()
+	defer r.globalMu.RUnlock()
+	return r.globalOff.IsZero() || time.Now().UTC().After(r.globalOff)
+}
+
+func (r *cityResolver) markGlobalVertexBackoff(d time.Duration) {
+	if d <= 0 {
+		return
+	}
+	r.globalMu.Lock()
+	defer r.globalMu.Unlock()
+	until := time.Now().UTC().Add(d)
+	if until.After(r.globalOff) {
+		r.globalOff = until
+	}
 }
 
 func (r *cityResolver) acquireVertexSlot(ctx context.Context) error {
@@ -239,16 +279,25 @@ func (r *cityResolver) storeMem(key string, city string) {
 	r.memCache[key] = city
 }
 
-func (r *cityResolver) loadDBCache(ctx context.Context, key string) string {
+func (r *cityResolver) loadDBCache(ctx context.Context, key string) (string, bool) {
 	if r.db == nil || key == "" {
-		return ""
+		return "", false
 	}
-	var row model.CityResolutionCache
-	err := r.db.WithContext(ctx).Where("cache_key = ?", key).Take(&row).Error
-	if err != nil {
-		return ""
+	var rows []model.CityResolutionCache
+	if err := r.db.WithContext(ctx).
+		Where("cache_key = ?", key).
+		Limit(1).
+		Find(&rows).Error; err != nil || len(rows) == 0 {
+		return "", false
 	}
-	return normalizeCityToken(row.City)
+	row := rows[0]
+	src := strings.ToLower(strings.TrimSpace(row.Source))
+	if strings.HasPrefix(src, "vertex_") && (strings.Contains(src, "failed") || strings.Contains(src, "rate_limited")) {
+		if row.UpdatedAt.After(time.Now().UTC().Add(-10 * time.Minute)) {
+			return "", true
+		}
+	}
+	return normalizeCityToken(row.City), false
 }
 
 func (r *cityResolver) persistCache(ctx context.Context, key string, question string, slug string, city string, source string) {
@@ -260,6 +309,31 @@ func (r *cityResolver) persistCache(ctx context.Context, key string, question st
 		Question:  strings.TrimSpace(question),
 		Slug:      strings.TrimSpace(slug),
 		City:      city,
+		Source:    source,
+		CreatedAt: time.Now().UTC(),
+		UpdatedAt: time.Now().UTC(),
+	}
+	_ = r.db.WithContext(ctx).
+		Clauses(clause.OnConflict{
+			Columns: []clause.Column{{Name: "cache_key"}},
+			DoUpdates: clause.Assignments(map[string]any{
+				"city":       row.City,
+				"source":     row.Source,
+				"updated_at": row.UpdatedAt,
+			}),
+		}).
+		Create(&row).Error
+}
+
+func (r *cityResolver) persistNegativeCache(ctx context.Context, key string, question string, slug string, source string) {
+	if r.db == nil || key == "" {
+		return
+	}
+	row := model.CityResolutionCache{
+		CacheKey:  key,
+		Question:  strings.TrimSpace(question),
+		Slug:      strings.TrimSpace(slug),
+		City:      "",
 		Source:    source,
 		CreatedAt: time.Now().UTC(),
 		UpdatedAt: time.Now().UTC(),
