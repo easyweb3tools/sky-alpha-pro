@@ -111,6 +111,10 @@ func TestGenerateSignalsDedupByDay(t *testing.T) {
 			question TEXT,
 			city TEXT,
 			market_type TEXT,
+			threshold_f DECIMAL(6,2),
+			comparator TEXT,
+			weather_target_date DATE,
+			spec_status TEXT,
 			end_date DATETIME,
 			is_active NUMERIC
 		)`,
@@ -138,9 +142,12 @@ func TestGenerateSignalsDedupByDay(t *testing.T) {
 			signal_type TEXT,
 			direction TEXT,
 			edge_pct DECIMAL(8,4),
+			edge_exec_pct DECIMAL(8,4),
 			confidence DECIMAL(5,2),
 			market_price DECIMAL(10,4),
+			market_price_executable DECIMAL(10,4),
 			our_estimate DECIMAL(10,4),
+			friction_pct DECIMAL(8,4),
 			reasoning TEXT,
 			ai_model TEXT,
 			acted_on NUMERIC,
@@ -217,7 +224,7 @@ func TestGenerateSignalsDedupByDay(t *testing.T) {
 		t.Fatalf("first generate: %v", err)
 	}
 	if res1.Generated != 1 {
-		t.Fatalf("expected 1 generated on first run, got=%d", res1.Generated)
+		t.Fatalf("expected 1 generated on first run, got=%d skipped=%d reasons=%v errors=%v", res1.Generated, res1.Skipped, res1.SkipReasons, res1.Errors)
 	}
 
 	res2, err := svc.GenerateSignals(context.Background(), GenerateOptions{Limit: 10})

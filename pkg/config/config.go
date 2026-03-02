@@ -73,6 +73,9 @@ type WeatherConfig struct {
 
 type SignalConfig struct {
 	MinEdgePct          float64 `mapstructure:"min_edge_pct"`
+	MinEdgeExecPct      float64 `mapstructure:"min_edge_exec_pct"`
+	ExecFeePct          float64 `mapstructure:"exec_fee_pct"`
+	ExecSlippagePct     float64 `mapstructure:"exec_slippage_pct"`
 	MaxMarkets          int     `mapstructure:"max_markets"`
 	DefaultLimit        int     `mapstructure:"default_limit"`
 	Concurrency         int     `mapstructure:"concurrency"`
@@ -239,6 +242,9 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("weather.user_agent", "sky-alpha-pro/0.1.0")
 
 	v.SetDefault("signal.min_edge_pct", 5.0)
+	v.SetDefault("signal.min_edge_exec_pct", 2.0)
+	v.SetDefault("signal.exec_fee_pct", 0.2)
+	v.SetDefault("signal.exec_slippage_pct", 0.3)
 	v.SetDefault("signal.max_markets", 500)
 	v.SetDefault("signal.default_limit", 50)
 	v.SetDefault("signal.concurrency", 10)

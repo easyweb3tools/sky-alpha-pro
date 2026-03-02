@@ -19,6 +19,7 @@ func AutoMigrate(db *gorm.DB) error {
 		&model.Forecast{},
 		&model.Observation{},
 		&model.Signal{},
+		&model.SignalRun{},
 		&model.Trade{},
 		&model.Competitor{},
 		&model.CompetitorTrade{},

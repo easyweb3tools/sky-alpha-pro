@@ -8,27 +8,31 @@ import (
 )
 
 type Market struct {
-	ID               string              `gorm:"column:id;type:uuid;default:gen_random_uuid();primaryKey"`
-	PolymarketID     string              `gorm:"column:polymarket_id;size:255;uniqueIndex;not null"`
-	ConditionID      string              `gorm:"column:condition_id;size:66"`
-	Slug             string              `gorm:"column:slug;size:255"`
-	Question         string              `gorm:"column:question;type:text;not null"`
-	Description      string              `gorm:"column:description;type:text"`
-	City             string              `gorm:"column:city;size:100;index:idx_markets_city"`
-	MarketType       string              `gorm:"column:market_type;size:50;not null;index:idx_markets_type"`
-	ResolutionSource string              `gorm:"column:resolution_source;size:255"`
-	TokenIDYes       string              `gorm:"column:token_id_yes;size:255"`
-	TokenIDNo        string              `gorm:"column:token_id_no;size:255"`
-	OutcomeYes       string              `gorm:"column:outcome_yes;size:255"`
-	OutcomeNo        string              `gorm:"column:outcome_no;size:255"`
-	EndDate          time.Time           `gorm:"column:end_date;index:idx_markets_active"`
-	IsActive         bool                `gorm:"column:is_active;default:true;index:idx_markets_active"`
-	IsResolved       bool                `gorm:"column:is_resolved;default:false"`
-	Resolution       string              `gorm:"column:resolution;size:10"`
-	VolumeTotal      decimal.NullDecimal `gorm:"column:volume_total;type:decimal(18,2)"`
-	Liquidity        decimal.NullDecimal `gorm:"column:liquidity;type:decimal(18,2)"`
-	CreatedAt        time.Time           `gorm:"column:created_at"`
-	UpdatedAt        time.Time           `gorm:"column:updated_at"`
+	ID                string              `gorm:"column:id;type:uuid;default:gen_random_uuid();primaryKey"`
+	PolymarketID      string              `gorm:"column:polymarket_id;size:255;uniqueIndex;not null"`
+	ConditionID       string              `gorm:"column:condition_id;size:66"`
+	Slug              string              `gorm:"column:slug;size:255"`
+	Question          string              `gorm:"column:question;type:text;not null"`
+	Description       string              `gorm:"column:description;type:text"`
+	City              string              `gorm:"column:city;size:100;index:idx_markets_city"`
+	MarketType        string              `gorm:"column:market_type;size:50;not null;index:idx_markets_type"`
+	ResolutionSource  string              `gorm:"column:resolution_source;size:255"`
+	TokenIDYes        string              `gorm:"column:token_id_yes;size:255"`
+	TokenIDNo         string              `gorm:"column:token_id_no;size:255"`
+	OutcomeYes        string              `gorm:"column:outcome_yes;size:255"`
+	OutcomeNo         string              `gorm:"column:outcome_no;size:255"`
+	EndDate           time.Time           `gorm:"column:end_date;index:idx_markets_active"`
+	IsActive          bool                `gorm:"column:is_active;default:true;index:idx_markets_active"`
+	IsResolved        bool                `gorm:"column:is_resolved;default:false"`
+	Resolution        string              `gorm:"column:resolution;size:10"`
+	VolumeTotal       decimal.NullDecimal `gorm:"column:volume_total;type:decimal(18,2)"`
+	Liquidity         decimal.NullDecimal `gorm:"column:liquidity;type:decimal(18,2)"`
+	ThresholdF        decimal.NullDecimal `gorm:"column:threshold_f;type:decimal(6,2)"`
+	Comparator        string              `gorm:"column:comparator;size:8"`
+	WeatherTargetDate *time.Time          `gorm:"column:weather_target_date;type:date;index:idx_markets_weather_target_date"`
+	SpecStatus        string              `gorm:"column:spec_status;size:20;default:incomplete;index:idx_markets_spec_status"`
+	CreatedAt         time.Time           `gorm:"column:created_at"`
+	UpdatedAt         time.Time           `gorm:"column:updated_at"`
 }
 
 type MarketPrice struct {
@@ -84,19 +88,38 @@ type Observation struct {
 }
 
 type Signal struct {
-	ID          uint64    `gorm:"column:id;primaryKey;autoIncrement"`
-	MarketID    string    `gorm:"column:market_id;type:uuid;not null;index:idx_signals_market,priority:1"`
-	SignalDate  time.Time `gorm:"column:signal_date;type:date;index:idx_signals_market_date,priority:2"`
-	SignalType  string    `gorm:"column:signal_type;size:30;not null;index:idx_signals_type,priority:1"`
-	Direction   string    `gorm:"column:direction;size:10;not null"`
-	EdgePct     float64   `gorm:"column:edge_pct;type:decimal(8,4);not null"`
-	Confidence  float64   `gorm:"column:confidence;type:decimal(5,2)"`
-	MarketPrice float64   `gorm:"column:market_price;type:decimal(10,4)"`
-	OurEstimate float64   `gorm:"column:our_estimate;type:decimal(10,4)"`
-	Reasoning   string    `gorm:"column:reasoning;type:text"`
-	AIModel     string    `gorm:"column:ai_model;size:50"`
-	ActedOn     bool      `gorm:"column:acted_on;default:false"`
-	CreatedAt   time.Time `gorm:"column:created_at;not null;index:idx_signals_market,sort:desc,priority:2;index:idx_signals_type,sort:desc,priority:2;index:idx_signals_market_date,sort:desc,priority:3"`
+	ID                    uint64    `gorm:"column:id;primaryKey;autoIncrement"`
+	MarketID              string    `gorm:"column:market_id;type:uuid;not null;index:idx_signals_market,priority:1"`
+	SignalDate            time.Time `gorm:"column:signal_date;type:date;index:idx_signals_market_date,priority:2"`
+	SignalType            string    `gorm:"column:signal_type;size:30;not null;index:idx_signals_type,priority:1"`
+	Direction             string    `gorm:"column:direction;size:10;not null"`
+	EdgePct               float64   `gorm:"column:edge_pct;type:decimal(8,4);not null"`
+	Confidence            float64   `gorm:"column:confidence;type:decimal(5,2)"`
+	MarketPrice           float64   `gorm:"column:market_price;type:decimal(10,4)"`
+	MarketPriceExecutable float64   `gorm:"column:market_price_executable;type:decimal(10,4)"`
+	OurEstimate           float64   `gorm:"column:our_estimate;type:decimal(10,4)"`
+	FrictionPct           float64   `gorm:"column:friction_pct;type:decimal(8,4)"`
+	EdgeExecPct           float64   `gorm:"column:edge_exec_pct;type:decimal(8,4)"`
+	Reasoning             string    `gorm:"column:reasoning;type:text"`
+	AIModel               string    `gorm:"column:ai_model;size:50"`
+	ActedOn               bool      `gorm:"column:acted_on;default:false"`
+	CreatedAt             time.Time `gorm:"column:created_at;not null;index:idx_signals_market,sort:desc,priority:2;index:idx_signals_type,sort:desc,priority:2;index:idx_signals_market_date,sort:desc,priority:3"`
+}
+
+type SignalRun struct {
+	ID               uint64         `gorm:"column:id;primaryKey;autoIncrement"`
+	StartedAt        time.Time      `gorm:"column:started_at;not null;index:idx_signal_runs_time,sort:desc,priority:1"`
+	FinishedAt       time.Time      `gorm:"column:finished_at;not null"`
+	DurationMS       int            `gorm:"column:duration_ms;not null"`
+	MarketsTotal     int            `gorm:"column:markets_total;default:0"`
+	SpecReady        int            `gorm:"column:spec_ready;default:0"`
+	ForecastReady    int            `gorm:"column:forecast_ready;default:0"`
+	RawEdgePass      int            `gorm:"column:raw_edge_pass;default:0"`
+	ExecEdgePass     int            `gorm:"column:exec_edge_pass;default:0"`
+	SignalsGenerated int            `gorm:"column:signals_generated;default:0"`
+	Skipped          int            `gorm:"column:skipped;default:0"`
+	SkipReasonsJSON  datatypes.JSON `gorm:"column:skip_reasons_json;type:jsonb"`
+	CreatedAt        time.Time      `gorm:"column:created_at;not null;index:idx_signal_runs_time,sort:desc,priority:2"`
 }
 
 type Trade struct {

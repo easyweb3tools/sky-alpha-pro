@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"math"
 	"net/http"
+	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -21,6 +23,8 @@ import (
 )
 
 const defaultSyncConcurrency = 10
+
+var marketThresholdPattern = regexp.MustCompile(`(?i)(\d+(?:\.\d+)?)\s*°?\s*([FC])`)
 
 type Service struct {
 	cfg   config.MarketConfig
@@ -305,50 +309,74 @@ func (s *Service) upsertMarket(ctx context.Context, gm GammaMarket) (*model.Mark
 		active = false
 	}
 
+	targetDate := endDate.UTC().AddDate(0, 0, -1)
+	targetDate = time.Date(targetDate.Year(), targetDate.Month(), targetDate.Day(), 0, 0, 0, 0, time.UTC)
+	threshold, thresholdOK := parseQuestionThresholdF(gm.Question)
+	comparator := inferComparator(gm.Question, normalizeMarketType(gm.MarketType, gm.Question))
+	specStatus := "incomplete"
+	thresholdValue := decimal.NullDecimal{}
+	if thresholdOK {
+		thresholdValue = decimal.NullDecimal{
+			Decimal: decimal.NewFromFloat(threshold),
+			Valid:   true,
+		}
+	}
+	if thresholdOK && comparator != "" && gm.City != "" {
+		specStatus = "ready"
+	}
+
 	upsertRow := model.Market{
-		ID:               uuid.NewString(),
-		PolymarketID:     gm.PolymarketID,
-		ConditionID:      gm.ConditionID,
-		Slug:             gm.Slug,
-		Question:         gm.Question,
-		Description:      gm.Description,
-		City:             gm.City,
-		MarketType:       normalizeMarketType(gm.MarketType, gm.Question),
-		ResolutionSource: "",
-		TokenIDYes:       gm.TokenIDYes,
-		TokenIDNo:        gm.TokenIDNo,
-		OutcomeYes:       fallbackString(gm.OutcomeYes, "YES"),
-		OutcomeNo:        fallbackString(gm.OutcomeNo, "NO"),
-		EndDate:          endDate,
-		IsActive:         active,
-		IsResolved:       gm.IsResolved,
-		Resolution:       gm.Resolution,
-		VolumeTotal:      nullDecimalFromFloat(gm.VolumeTotal),
-		Liquidity:        nullDecimalFromFloat(gm.Liquidity),
+		ID:                uuid.NewString(),
+		PolymarketID:      gm.PolymarketID,
+		ConditionID:       gm.ConditionID,
+		Slug:              gm.Slug,
+		Question:          gm.Question,
+		Description:       gm.Description,
+		City:              gm.City,
+		MarketType:        normalizeMarketType(gm.MarketType, gm.Question),
+		ResolutionSource:  "",
+		TokenIDYes:        gm.TokenIDYes,
+		TokenIDNo:         gm.TokenIDNo,
+		OutcomeYes:        fallbackString(gm.OutcomeYes, "YES"),
+		OutcomeNo:         fallbackString(gm.OutcomeNo, "NO"),
+		EndDate:           endDate,
+		IsActive:          active,
+		IsResolved:        gm.IsResolved,
+		Resolution:        gm.Resolution,
+		VolumeTotal:       nullDecimalFromFloat(gm.VolumeTotal),
+		Liquidity:         nullDecimalFromFloat(gm.Liquidity),
+		ThresholdF:        thresholdValue,
+		Comparator:        comparator,
+		WeatherTargetDate: &targetDate,
+		SpecStatus:        specStatus,
 	}
 
 	err := s.db.WithContext(ctx).
 		Clauses(clause.OnConflict{
 			Columns: []clause.Column{{Name: "polymarket_id"}},
 			DoUpdates: clause.Assignments(map[string]any{
-				"condition_id":      upsertRow.ConditionID,
-				"slug":              upsertRow.Slug,
-				"question":          upsertRow.Question,
-				"description":       upsertRow.Description,
-				"city":              upsertRow.City,
-				"market_type":       upsertRow.MarketType,
-				"resolution_source": upsertRow.ResolutionSource,
-				"token_id_yes":      upsertRow.TokenIDYes,
-				"token_id_no":       upsertRow.TokenIDNo,
-				"outcome_yes":       upsertRow.OutcomeYes,
-				"outcome_no":        upsertRow.OutcomeNo,
-				"end_date":          upsertRow.EndDate,
-				"is_active":         upsertRow.IsActive,
-				"is_resolved":       upsertRow.IsResolved,
-				"resolution":        upsertRow.Resolution,
-				"volume_total":      upsertRow.VolumeTotal,
-				"liquidity":         upsertRow.Liquidity,
-				"updated_at":        time.Now().UTC(),
+				"condition_id":        upsertRow.ConditionID,
+				"slug":                upsertRow.Slug,
+				"question":            upsertRow.Question,
+				"description":         upsertRow.Description,
+				"city":                upsertRow.City,
+				"market_type":         upsertRow.MarketType,
+				"resolution_source":   upsertRow.ResolutionSource,
+				"token_id_yes":        upsertRow.TokenIDYes,
+				"token_id_no":         upsertRow.TokenIDNo,
+				"outcome_yes":         upsertRow.OutcomeYes,
+				"outcome_no":          upsertRow.OutcomeNo,
+				"end_date":            upsertRow.EndDate,
+				"is_active":           upsertRow.IsActive,
+				"is_resolved":         upsertRow.IsResolved,
+				"resolution":          upsertRow.Resolution,
+				"volume_total":        upsertRow.VolumeTotal,
+				"liquidity":           upsertRow.Liquidity,
+				"threshold_f":         upsertRow.ThresholdF,
+				"comparator":          upsertRow.Comparator,
+				"weather_target_date": upsertRow.WeatherTargetDate,
+				"spec_status":         upsertRow.SpecStatus,
+				"updated_at":          time.Now().UTC(),
 			}),
 		}).
 		Create(&upsertRow).Error
@@ -419,5 +447,39 @@ func nullDecimalFromFloat(v float64) decimal.NullDecimal {
 	return decimal.NullDecimal{
 		Decimal: decimal.NewFromFloat(v),
 		Valid:   true,
+	}
+}
+
+func parseQuestionThresholdF(question string) (float64, bool) {
+	matches := marketThresholdPattern.FindStringSubmatch(question)
+	if len(matches) < 3 {
+		return 0, false
+	}
+	value, err := strconv.ParseFloat(strings.TrimSpace(matches[1]), 64)
+	if err != nil {
+		return 0, false
+	}
+	unit := strings.ToUpper(strings.TrimSpace(matches[2]))
+	if unit == "C" {
+		value = (value * 9.0 / 5.0) + 32.0
+	}
+	return value, true
+}
+
+func inferComparator(question string, marketType string) string {
+	q := strings.ToLower(question)
+	switch {
+	case strings.Contains(q, "below"), strings.Contains(q, "under"), strings.Contains(q, "at most"), strings.Contains(q, "no more than"):
+		return "le"
+	case strings.Contains(q, "above"), strings.Contains(q, "exceed"), strings.Contains(q, "at least"), strings.Contains(q, "no less than"):
+		return "ge"
+	}
+	switch marketType {
+	case "temperature_low":
+		return "le"
+	case "temperature_high":
+		return "ge"
+	default:
+		return ""
 	}
 }
