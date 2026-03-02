@@ -122,6 +122,17 @@ type SignalRun struct {
 	CreatedAt        time.Time      `gorm:"column:created_at;not null;index:idx_signal_runs_time,sort:desc,priority:2"`
 }
 
+type CityResolutionCache struct {
+	ID        uint64    `gorm:"column:id;primaryKey;autoIncrement"`
+	CacheKey  string    `gorm:"column:cache_key;size:64;uniqueIndex;not null"`
+	Question  string    `gorm:"column:question;type:text;not null"`
+	Slug      string    `gorm:"column:slug;size:255"`
+	City      string    `gorm:"column:city;size:100;not null;index:idx_city_resolution_city"`
+	Source    string    `gorm:"column:source;size:20;not null"`
+	CreatedAt time.Time `gorm:"column:created_at;not null"`
+	UpdatedAt time.Time `gorm:"column:updated_at"`
+}
+
 type Trade struct {
 	ID         uint64              `gorm:"column:id;primaryKey;autoIncrement"`
 	MarketID   string              `gorm:"column:market_id;type:uuid;not null;index:idx_trades_market,priority:1"`

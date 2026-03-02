@@ -25,9 +25,10 @@ import (
 var thresholdPattern = regexp.MustCompile(`(?i)(?:above|below|over|under|exceed|at least|at most|no more than|no less than)[^0-9-]{0,24}(-?\d+(?:\.\d+)?)\s*°?\s*([FC])?`)
 
 type Service struct {
-	cfg config.SignalConfig
-	db  *gorm.DB
-	log *zap.Logger
+	cfg          config.SignalConfig
+	db           *gorm.DB
+	log          *zap.Logger
+	cityResolver *cityResolver
 }
 
 type forecastSourceValue = ForecastSnapshot
@@ -53,6 +54,11 @@ type marketSpec struct {
 	Status     string
 }
 
+type cityAlias struct {
+	Alias string
+	City  string
+}
+
 type signalEval struct {
 	SpecReady     bool
 	ForecastReady bool
@@ -62,8 +68,46 @@ type signalEval struct {
 	SkipReason    string
 }
 
+var defaultCityAliases = []cityAlias{
+	{Alias: "new york city", City: "new york"},
+	{Alias: "new york", City: "new york"},
+	{Alias: "los angeles", City: "los angeles"},
+	{Alias: "san francisco", City: "san francisco"},
+	{Alias: "san diego", City: "san diego"},
+	{Alias: "las vegas", City: "las vegas"},
+	{Alias: "salt lake city", City: "salt lake city"},
+	{Alias: "washington dc", City: "washington dc"},
+	{Alias: "washington, dc", City: "washington dc"},
+	{Alias: "philadelphia", City: "philadelphia"},
+	{Alias: "new orleans", City: "new orleans"},
+	{Alias: "st louis", City: "st louis"},
+	{Alias: "kansas city", City: "kansas city"},
+	{Alias: "minneapolis", City: "minneapolis"},
+	{Alias: "chicago", City: "chicago"},
+	{Alias: "miami", City: "miami"},
+	{Alias: "boston", City: "boston"},
+	{Alias: "seattle", City: "seattle"},
+	{Alias: "atlanta", City: "atlanta"},
+	{Alias: "denver", City: "denver"},
+	{Alias: "houston", City: "houston"},
+	{Alias: "phoenix", City: "phoenix"},
+	{Alias: "dallas", City: "dallas"},
+	{Alias: "austin", City: "austin"},
+	{Alias: "orlando", City: "orlando"},
+	{Alias: "tampa", City: "tampa"},
+	{Alias: "portland", City: "portland"},
+	{Alias: "detroit", City: "detroit"},
+	{Alias: "pittsburgh", City: "pittsburgh"},
+	{Alias: "cleveland", City: "cleveland"},
+}
+
 func NewService(cfg config.SignalConfig, db *gorm.DB, log *zap.Logger) *Service {
-	return &Service{cfg: cfg, db: db, log: log}
+	return &Service{
+		cfg:          cfg,
+		db:           db,
+		log:          log,
+		cityResolver: newCityResolver(db, log),
+	}
 }
 
 func (s *Service) GenerateSignals(ctx context.Context, opts GenerateOptions) (*GenerateResult, error) {
@@ -242,7 +286,14 @@ func (s *Service) ResolveMarketCity(ctx context.Context, market model.Market) (s
 	if err != nil {
 		return "", err
 	}
-	return inferCity(market, knownCities), nil
+	return s.resolveCity(ctx, market, knownCities), nil
+}
+
+func (s *Service) resolveCity(ctx context.Context, market model.Market, knownCities []string) string {
+	if s.cityResolver == nil {
+		return ""
+	}
+	return s.cityResolver.Resolve(ctx, market, knownCities)
 }
 
 func (s *Service) LoadForecastSnapshots(ctx context.Context, city string, targetDate time.Time, marketType string) ([]ForecastSnapshot, error) {
@@ -379,7 +430,7 @@ func (s *Service) loadMarket(ctx context.Context, marketRef string) (*model.Mark
 
 func (s *Service) ensureMarketSpec(ctx context.Context, m model.Market, knownCities []string) (marketSpec, string, error) {
 	spec := marketSpec{
-		City:       inferCity(m, knownCities),
+		City:       s.resolveCity(ctx, m, knownCities),
 		Comparator: normalizeComparator(m.Comparator, m.MarketType),
 		Status:     strings.ToLower(strings.TrimSpace(m.SpecStatus)),
 	}
@@ -402,14 +453,20 @@ func (s *Service) ensureMarketSpec(ctx context.Context, m model.Market, knownCit
 	} else {
 		parsed, ok := parseThresholdFahrenheit(m.Question)
 		if !ok {
+			spec.Status = "missing_threshold"
+			_ = s.persistMarketSpec(ctx, m.ID, spec)
 			return spec, skipReasonThresholdMissing, nil
 		}
 		spec.ThresholdF = parsed
 	}
 	if spec.City == "" {
+		spec.Status = "missing_city"
+		_ = s.persistMarketSpec(ctx, m.ID, spec)
 		return spec, skipReasonCityMissing, nil
 	}
 	if spec.Comparator == "" || spec.TargetDate.IsZero() {
+		spec.Status = "incomplete"
+		_ = s.persistMarketSpec(ctx, m.ID, spec)
 		return spec, skipReasonSpecIncomplete, nil
 	}
 	spec.Status = "ready"
@@ -575,19 +632,6 @@ func (s *Service) loadKnownCities(ctx context.Context) ([]string, error) {
 		return len(cities[i]) > len(cities[j])
 	})
 	return cities, nil
-}
-
-func inferCity(m model.Market, knownCities []string) string {
-	if city := normalizeCityToken(m.City); city != "" {
-		return city
-	}
-	q := strings.ToLower(m.Question)
-	for _, city := range knownCities {
-		if strings.Contains(q, city) {
-			return city
-		}
-	}
-	return ""
 }
 
 func normalizeForecastCity(city string, location string) string {
