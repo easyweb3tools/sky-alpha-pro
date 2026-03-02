@@ -5,6 +5,7 @@ import (
 	"crypto/sha1"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math/rand"
 	"os"
@@ -37,20 +38,36 @@ type cityResolver struct {
 	globalOff  time.Time
 }
 
+var errVertexGlobalBackoff = errors.New("vertex global backoff active")
+
 type cityVertexClient struct {
 	client  *genai.Client
 	model   string
 	timeout time.Duration
 }
 
+const signalCityResolverUseVertexEnv = "SKY_ALPHA_SIGNAL_CITY_RESOLVER_USE_VERTEX"
+
 func newCityResolver(db *gorm.DB, log *zap.Logger) *cityResolver {
+	useVertex := strings.EqualFold(strings.TrimSpace(os.Getenv(signalCityResolverUseVertexEnv)), "true")
+	var vertexClient *cityVertexClient
+	if useVertex {
+		vertexClient = newCityVertexClient(log)
+		if vertexClient == nil && log != nil {
+			log.Warn("signal city resolver vertex enabled but unavailable; fallback to rule-only")
+		}
+	} else if log != nil {
+		log.Info("signal city resolver uses rule-only mode", zap.String("env", signalCityResolverUseVertexEnv))
+	}
+
 	return &cityResolver{
 		db:        db,
 		log:       log,
-		vertex:    newCityVertexClient(log),
+		vertex:    vertexClient,
 		memCache:  make(map[string]string, 256),
 		failUntil: make(map[string]time.Time, 256),
-		vertexSem: make(chan struct{}, 2),
+		// Single worker to flatten bursts on low Vertex quota.
+		vertexSem: make(chan struct{}, 1),
 	}
 }
 
@@ -91,6 +108,10 @@ func (r *cityResolver) Resolve(ctx context.Context, m model.Market, knownCities 
 		return city, nil
 	})
 	if err != nil {
+		if errors.Is(err, errVertexGlobalBackoff) {
+			r.persistNegativeCache(ctx, key, m.Question, m.Slug, "vertex_global_backoff")
+			return ""
+		}
 		if r.log != nil {
 			r.log.Warn("vertex city resolve failed", zap.Error(err))
 		}
@@ -119,6 +140,9 @@ func (r *cityResolver) resolveCityByVertexWithRetry(ctx context.Context, questio
 	var lastErr error
 	backoff := 900 * time.Millisecond
 	for attempt := 1; attempt <= 2; attempt++ {
+		if !r.allowGlobalVertex() {
+			return "", errVertexGlobalBackoff
+		}
 		if err := r.acquireVertexSlot(ctx); err != nil {
 			return "", err
 		}
@@ -225,7 +249,7 @@ func (r *cityResolver) acquireVertexSlot(ctx context.Context) error {
 		r.nextVertex = now
 	}
 	wait := time.Until(r.nextVertex)
-	r.nextVertex = r.nextVertex.Add(400 * time.Millisecond)
+	r.nextVertex = r.nextVertex.Add(1200 * time.Millisecond)
 	r.rateMu.Unlock()
 
 	if wait > 0 {
@@ -292,7 +316,7 @@ func (r *cityResolver) loadDBCache(ctx context.Context, key string) (string, boo
 	}
 	row := rows[0]
 	src := strings.ToLower(strings.TrimSpace(row.Source))
-	if strings.HasPrefix(src, "vertex_") && (strings.Contains(src, "failed") || strings.Contains(src, "rate_limited")) {
+	if strings.HasPrefix(src, "vertex_") && (strings.Contains(src, "failed") || strings.Contains(src, "rate_limited") || strings.Contains(src, "global_backoff")) {
 		if row.UpdatedAt.After(time.Now().UTC().Add(-10 * time.Minute)) {
 			return "", true
 		}
