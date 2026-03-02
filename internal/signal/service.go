@@ -3,6 +3,7 @@ package signal
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"math"
@@ -31,11 +32,41 @@ type Service struct {
 
 type forecastSourceValue = ForecastSnapshot
 
+const (
+	skipReasonSpecIncomplete     = "spec_incomplete"
+	skipReasonCityMissing        = "city_missing"
+	skipReasonThresholdMissing   = "threshold_missing"
+	skipReasonLatestPriceMissing = "latest_price_missing"
+	skipReasonInvalidMarketPrice = "invalid_market_price"
+	skipReasonNoForecast         = "no_forecast"
+	skipReasonRawEdgeBelow       = "edge_below_raw_threshold"
+	skipReasonExecEdgeBelow      = "edge_below_exec_threshold"
+	skipReasonPersistFailed      = "persist_failed"
+)
+
+type marketSpec struct {
+	City       string
+	ThresholdF float64
+	Comparator string
+	TargetDate time.Time
+	Status     string
+}
+
+type signalEval struct {
+	SpecReady     bool
+	ForecastReady bool
+	RawEdgePass   bool
+	ExecEdgePass  bool
+	Generated     bool
+	SkipReason    string
+}
+
 func NewService(cfg config.SignalConfig, db *gorm.DB, log *zap.Logger) *Service {
 	return &Service{cfg: cfg, db: db, log: log}
 }
 
 func (s *Service) GenerateSignals(ctx context.Context, opts GenerateOptions) (*GenerateResult, error) {
+	startedAt := time.Now().UTC()
 	limit := opts.Limit
 	if limit <= 0 {
 		limit = s.cfg.DefaultLimit
@@ -60,10 +91,13 @@ func (s *Service) GenerateSignals(ctx context.Context, opts GenerateOptions) (*G
 	}
 
 	result := &GenerateResult{
-		Processed: len(markets),
-		Errors:    make([]string, 0),
+		Processed:    len(markets),
+		MarketsTotal: len(markets),
+		SkipReasons:  make(map[string]int),
+		Errors:       make([]string, 0),
 	}
 	if len(markets) == 0 {
+		s.persistSignalRun(ctx, result, startedAt, time.Now().UTC())
 		return result, nil
 	}
 
@@ -79,25 +113,49 @@ func (s *Service) GenerateSignals(ctx context.Context, opts GenerateOptions) (*G
 	for _, market := range markets {
 		m := market
 		g.Go(func() error {
-			genErr := s.generateSignalForMarket(gctx, m, knownCities)
+			eval, genErr := s.generateSignalForMarket(gctx, m, knownCities)
 			mu.Lock()
 			defer mu.Unlock()
+			if eval.SpecReady {
+				result.SpecReady++
+			}
+			if eval.ForecastReady {
+				result.ForecastReady++
+			}
+			if eval.RawEdgePass {
+				result.RawEdgePass++
+			}
+			if eval.ExecEdgePass {
+				result.ExecEdgePass++
+			}
+			if eval.SkipReason != "" {
+				result.SkipReasons[eval.SkipReason]++
+			}
 			if genErr != nil {
 				result.Skipped++
 				result.Errors = append(result.Errors, fmt.Sprintf("%s: %v", m.PolymarketID, genErr))
+				if eval.SkipReason == "" {
+					result.SkipReasons[skipReasonPersistFailed]++
+				}
 				if errors.Is(genErr, context.Canceled) || errors.Is(genErr, context.DeadlineExceeded) {
 					return genErr
 				}
 				return nil
 			}
-			result.Generated++
+			if eval.Generated {
+				result.Generated++
+			} else {
+				result.Skipped++
+			}
 			return nil
 		})
 	}
 
 	if err := g.Wait(); err != nil {
+		s.persistSignalRun(ctx, result, startedAt, time.Now().UTC())
 		return result, err
 	}
+	s.persistSignalRun(ctx, result, startedAt, time.Now().UTC())
 	return result, nil
 }
 
@@ -147,8 +205,15 @@ func (s *Service) GenerateSignalForMarketID(ctx context.Context, marketRef strin
 	if err != nil {
 		s.log.Warn("load known cities failed", zap.Error(err))
 	}
-	if err := s.generateSignalForMarket(ctx, *market, knownCities); err != nil {
+	eval, err := s.generateSignalForMarket(ctx, *market, knownCities)
+	if err != nil {
 		return nil, err
+	}
+	if !eval.Generated {
+		if eval.SkipReason == "" {
+			return nil, fmt.Errorf("signal skipped")
+		}
+		return nil, fmt.Errorf("signal skipped: %s", eval.SkipReason)
 	}
 	targetDate, err := marketForecastDate(market.EndDate)
 	if err != nil {
@@ -193,55 +258,71 @@ func (s *Service) GetSignalByID(ctx context.Context, id uint64) (*SignalView, er
 	return &view, nil
 }
 
-func (s *Service) generateSignalForMarket(ctx context.Context, m model.Market, knownCities []string) error {
-	city := inferCity(m, knownCities)
-	if city == "" {
-		return fmt.Errorf("city missing")
-	}
-
-	thresholdF, ok := parseThresholdFahrenheit(m.Question)
-	if !ok {
-		return fmt.Errorf("threshold not found in question")
-	}
-
-	targetDate, err := marketForecastDate(m.EndDate)
+func (s *Service) generateSignalForMarket(ctx context.Context, m model.Market, knownCities []string) (signalEval, error) {
+	eval := signalEval{}
+	spec, skipReason, err := s.ensureMarketSpec(ctx, m, knownCities)
 	if err != nil {
-		return err
+		return eval, err
 	}
+	if skipReason != "" {
+		eval.SkipReason = skipReason
+		return eval, nil
+	}
+	eval.SpecReady = true
 
 	var latestPrice model.MarketPrice
 	if err := s.db.WithContext(ctx).
 		Where("market_id = ?", m.ID).
 		Order("captured_at DESC").
 		First(&latestPrice).Error; err != nil {
-		return fmt.Errorf("latest price not found: %w", err)
+		eval.SkipReason = skipReasonLatestPriceMissing
+		return eval, fmt.Errorf("latest price not found: %w", err)
 	}
 	marketPrice := latestPrice.PriceYes.InexactFloat64()
 	if marketPrice <= 0 || marketPrice >= 1 {
-		return fmt.Errorf("invalid market price: %.4f", marketPrice)
+		eval.SkipReason = skipReasonInvalidMarketPrice
+		return eval, fmt.Errorf("invalid market price: %.4f", marketPrice)
 	}
 
-	sourceValues, err := s.loadForecastValues(ctx, city, targetDate, m.MarketType)
+	sourceValues, err := s.loadForecastValues(ctx, spec.City, spec.TargetDate, m.MarketType)
 	if err != nil {
-		return err
+		return eval, err
 	}
 	if len(sourceValues) == 0 {
-		return fmt.Errorf("no matched forecast values")
+		eval.SkipReason = skipReasonNoForecast
+		return eval, nil
 	}
+	eval.ForecastReady = true
 
 	values := make([]float64, 0, len(sourceValues))
 	for _, sv := range sourceValues {
 		values = append(values, sv.Value)
 	}
 
-	ourEstimate := estimateProbability(values, thresholdF, m.MarketType, s.cfg.MinSigma)
-	edgePct := (ourEstimate - marketPrice) * 100.0
-	if math.Abs(edgePct) < s.cfg.MinEdgePct {
-		return fmt.Errorf("edge %.2f below threshold %.2f", edgePct, s.cfg.MinEdgePct)
+	ourEstimate := estimateProbability(values, spec.ThresholdF, m.MarketType, s.cfg.MinSigma)
+	rawEdgePct := (ourEstimate - marketPrice) * 100.0
+	if math.Abs(rawEdgePct) < s.cfg.MinEdgePct {
+		eval.SkipReason = skipReasonRawEdgeBelow
+		return eval, nil
 	}
+	eval.RawEdgePass = true
+
+	marketPriceExecutable := selectExecutableMarketPrice(latestPrice, rawEdgePct)
+	execEdgePct := (ourEstimate - marketPriceExecutable) * 100.0
+	frictionPct := s.computeFrictionPct(latestPrice)
+	execEdgePct = applyFriction(execEdgePct, frictionPct)
+	minExecEdge := s.cfg.MinEdgeExecPct
+	if minExecEdge <= 0 {
+		minExecEdge = s.cfg.MinEdgePct
+	}
+	if math.Abs(execEdgePct) < minExecEdge {
+		eval.SkipReason = skipReasonExecEdgeBelow
+		return eval, nil
+	}
+	eval.ExecEdgePass = true
 
 	direction := "YES"
-	if edgePct < 0 {
+	if execEdgePct < 0 {
 		direction = "NO"
 	}
 
@@ -249,24 +330,32 @@ func (s *Service) generateSignalForMarket(ctx context.Context, m model.Market, k
 	if sigma < s.cfg.MinSigma {
 		sigma = s.cfg.MinSigma
 	}
-	confidence := estimateConfidence(len(sourceValues), edgePct, sigma)
-	reasoning := buildReasoning(city, thresholdF, targetDate, sourceValues, ourEstimate, marketPrice, edgePct, sigma)
+	confidence := estimateConfidence(len(sourceValues), execEdgePct, sigma)
+	reasoning := buildReasoning(spec.City, spec.ThresholdF, spec.TargetDate, sourceValues, ourEstimate, marketPrice, rawEdgePct, execEdgePct, frictionPct, sigma)
 
 	row := model.Signal{
-		MarketID:    m.ID,
-		SignalDate:  targetDate,
-		SignalType:  "forecast_edge",
-		Direction:   direction,
-		EdgePct:     edgePct,
-		Confidence:  confidence,
-		MarketPrice: marketPrice,
-		OurEstimate: ourEstimate,
-		Reasoning:   reasoning,
-		AIModel:     "probability-model-v1",
-		ActedOn:     false,
-		CreatedAt:   time.Now().UTC(),
+		MarketID:              m.ID,
+		SignalDate:            spec.TargetDate,
+		SignalType:            "forecast_edge",
+		Direction:             direction,
+		EdgePct:               rawEdgePct,
+		EdgeExecPct:           execEdgePct,
+		Confidence:            confidence,
+		MarketPrice:           marketPrice,
+		MarketPriceExecutable: marketPriceExecutable,
+		OurEstimate:           ourEstimate,
+		FrictionPct:           frictionPct,
+		Reasoning:             reasoning,
+		AIModel:               "probability-model-v1",
+		ActedOn:               false,
+		CreatedAt:             time.Now().UTC(),
 	}
-	return s.upsertSignalByDay(ctx, row)
+	if err := s.upsertSignalByDay(ctx, row); err != nil {
+		eval.SkipReason = skipReasonPersistFailed
+		return eval, err
+	}
+	eval.Generated = true
+	return eval, nil
 }
 
 func (s *Service) loadMarket(ctx context.Context, marketRef string) (*model.Market, error) {
@@ -281,6 +370,63 @@ func (s *Service) loadMarket(ctx context.Context, marketRef string) (*model.Mark
 		return nil, err
 	}
 	return &row, nil
+}
+
+func (s *Service) ensureMarketSpec(ctx context.Context, m model.Market, knownCities []string) (marketSpec, string, error) {
+	spec := marketSpec{
+		City:       inferCity(m, knownCities),
+		Comparator: normalizeComparator(m.Comparator, m.MarketType),
+		Status:     strings.ToLower(strings.TrimSpace(m.SpecStatus)),
+	}
+	if spec.Status == "" {
+		spec.Status = "incomplete"
+	}
+
+	if m.WeatherTargetDate != nil && !m.WeatherTargetDate.IsZero() {
+		spec.TargetDate = time.Date(m.WeatherTargetDate.Year(), m.WeatherTargetDate.Month(), m.WeatherTargetDate.Day(), 0, 0, 0, 0, time.UTC)
+	} else {
+		targetDate, err := marketForecastDate(m.EndDate)
+		if err != nil {
+			return spec, skipReasonSpecIncomplete, err
+		}
+		spec.TargetDate = targetDate
+	}
+
+	if m.ThresholdF.Valid {
+		spec.ThresholdF = m.ThresholdF.Decimal.InexactFloat64()
+	} else {
+		parsed, ok := parseThresholdFahrenheit(m.Question)
+		if !ok {
+			return spec, skipReasonThresholdMissing, nil
+		}
+		spec.ThresholdF = parsed
+	}
+	if spec.City == "" {
+		return spec, skipReasonCityMissing, nil
+	}
+	if spec.Comparator == "" || spec.ThresholdF <= 0 || spec.TargetDate.IsZero() {
+		return spec, skipReasonSpecIncomplete, nil
+	}
+	spec.Status = "ready"
+
+	if err := s.persistMarketSpec(ctx, m.ID, spec); err != nil {
+		return spec, "", err
+	}
+	return spec, "", nil
+}
+
+func (s *Service) persistMarketSpec(ctx context.Context, marketID string, spec marketSpec) error {
+	update := map[string]any{
+		"city":                spec.City,
+		"threshold_f":         spec.ThresholdF,
+		"comparator":          spec.Comparator,
+		"weather_target_date": spec.TargetDate,
+		"spec_status":         spec.Status,
+	}
+	return s.db.WithContext(ctx).
+		Table("markets").
+		Where("id = ?", marketID).
+		Updates(update).Error
 }
 
 func (s *Service) upsertSignalByDay(ctx context.Context, row model.Signal) error {
@@ -298,15 +444,18 @@ func (s *Service) upsertSignalByDay(ctx context.Context, row model.Signal) error
 		return err
 	}
 	return s.db.WithContext(ctx).Model(&model.Signal{}).Where("id = ?", existing.ID).Updates(map[string]any{
-		"signal_date":  row.SignalDate,
-		"direction":    row.Direction,
-		"edge_pct":     row.EdgePct,
-		"confidence":   row.Confidence,
-		"market_price": row.MarketPrice,
-		"our_estimate": row.OurEstimate,
-		"reasoning":    row.Reasoning,
-		"ai_model":     row.AIModel,
-		"created_at":   row.CreatedAt,
+		"signal_date":             row.SignalDate,
+		"direction":               row.Direction,
+		"edge_pct":                row.EdgePct,
+		"edge_exec_pct":           row.EdgeExecPct,
+		"confidence":              row.Confidence,
+		"market_price":            row.MarketPrice,
+		"market_price_executable": row.MarketPriceExecutable,
+		"our_estimate":            row.OurEstimate,
+		"friction_pct":            row.FrictionPct,
+		"reasoning":               row.Reasoning,
+		"ai_model":                row.AIModel,
+		"created_at":              row.CreatedAt,
 	}).Error
 }
 
@@ -474,7 +623,7 @@ func marketForecastDate(endDate time.Time) (time.Time, error) {
 	return time.Date(target.Year(), target.Month(), target.Day(), 0, 0, 0, 0, time.UTC), nil
 }
 
-func buildReasoning(city string, thresholdF float64, targetDate time.Time, values []forecastSourceValue, ourEstimate float64, marketPrice float64, edgePct float64, sigma float64) string {
+func buildReasoning(city string, thresholdF float64, targetDate time.Time, values []forecastSourceValue, ourEstimate float64, marketPrice float64, rawEdgePct float64, execEdgePct float64, frictionPct float64, sigma float64) string {
 	sort.Slice(values, func(i, j int) bool {
 		return values[i].Source < values[j].Source
 	})
@@ -483,7 +632,7 @@ func buildReasoning(city string, thresholdF float64, targetDate time.Time, value
 		parts = append(parts, fmt.Sprintf("%s=%.1fF", v.Source, v.Value))
 	}
 	return fmt.Sprintf(
-		"city=%s date=%s threshold=%.1fF forecasts=[%s] sigma=%.2f estimate=%.4f market=%.4f edge=%.2f%%",
+		"city=%s date=%s threshold=%.1fF forecasts=[%s] sigma=%.2f estimate=%.4f market=%.4f edge_raw=%.2f%% edge_exec=%.2f%% friction=%.2f%%",
 		city,
 		targetDate.Format("2006-01-02"),
 		thresholdF,
@@ -491,7 +640,9 @@ func buildReasoning(city string, thresholdF float64, targetDate time.Time, value
 		sigma,
 		ourEstimate,
 		marketPrice,
-		edgePct,
+		rawEdgePct,
+		execEdgePct,
+		frictionPct,
 	)
 }
 
@@ -584,17 +735,110 @@ func strconvParseFloat(v string) (float64, error) {
 	return strconv.ParseFloat(strings.TrimSpace(v), 64)
 }
 
+func normalizeComparator(value string, marketType string) string {
+	v := strings.ToLower(strings.TrimSpace(value))
+	switch v {
+	case "ge", ">=", ">":
+		return "ge"
+	case "le", "<=", "<":
+		return "le"
+	}
+	switch strings.ToLower(strings.TrimSpace(marketType)) {
+	case "temperature_low":
+		return "le"
+	case "temperature_high":
+		return "ge"
+	default:
+		return ""
+	}
+}
+
+func selectExecutableMarketPrice(price model.MarketPrice, rawEdgePct float64) float64 {
+	market := price.PriceYes.InexactFloat64()
+	if rawEdgePct >= 0 {
+		if price.AskYes.Valid {
+			v := price.AskYes.Decimal.InexactFloat64()
+			if v > 0 && v < 1 {
+				return v
+			}
+		}
+		return market
+	}
+	if price.BidYes.Valid {
+		v := price.BidYes.Decimal.InexactFloat64()
+		if v > 0 && v < 1 {
+			return v
+		}
+	}
+	return market
+}
+
+func applyFriction(edgePct float64, frictionPct float64) float64 {
+	if frictionPct <= 0 {
+		return edgePct
+	}
+	if edgePct > 0 {
+		return edgePct - frictionPct
+	}
+	return edgePct + frictionPct
+}
+
+func (s *Service) computeFrictionPct(latestPrice model.MarketPrice) float64 {
+	friction := s.cfg.ExecFeePct + s.cfg.ExecSlippagePct
+	if latestPrice.Spread.Valid {
+		friction += latestPrice.Spread.Decimal.InexactFloat64() * 100.0
+	}
+	if friction < 0 {
+		return 0
+	}
+	return friction
+}
+
+func (s *Service) persistSignalRun(ctx context.Context, result *GenerateResult, startedAt time.Time, finishedAt time.Time) {
+	if result == nil {
+		return
+	}
+	payload, err := json.Marshal(result.SkipReasons)
+	if err != nil {
+		payload = []byte("{}")
+	}
+	run := model.SignalRun{
+		StartedAt:        startedAt,
+		FinishedAt:       finishedAt,
+		DurationMS:       int(finishedAt.Sub(startedAt).Milliseconds()),
+		MarketsTotal:     result.MarketsTotal,
+		SpecReady:        result.SpecReady,
+		ForecastReady:    result.ForecastReady,
+		RawEdgePass:      result.RawEdgePass,
+		ExecEdgePass:     result.ExecEdgePass,
+		SignalsGenerated: result.Generated,
+		Skipped:          result.Skipped,
+		SkipReasonsJSON:  payload,
+		CreatedAt:        finishedAt,
+	}
+	if err := s.db.WithContext(ctx).Create(&run).Error; err != nil {
+		if s.log != nil {
+			s.log.Warn("persist signal run failed", zap.Error(err))
+		}
+		return
+	}
+	result.SignalRunID = run.ID
+}
+
 func mapSignalView(row model.Signal) SignalView {
 	return SignalView{
-		ID:          row.ID,
-		MarketID:    row.MarketID,
-		SignalDate:  row.SignalDate,
-		Direction:   row.Direction,
-		EdgePct:     row.EdgePct,
-		Confidence:  row.Confidence,
-		MarketPrice: row.MarketPrice,
-		OurEstimate: row.OurEstimate,
-		Reasoning:   row.Reasoning,
-		CreatedAt:   row.CreatedAt,
+		ID:                    row.ID,
+		MarketID:              row.MarketID,
+		SignalDate:            row.SignalDate,
+		Direction:             row.Direction,
+		EdgePct:               row.EdgePct,
+		EdgeExecPct:           row.EdgeExecPct,
+		Confidence:            row.Confidence,
+		MarketPrice:           row.MarketPrice,
+		MarketPriceExecutable: row.MarketPriceExecutable,
+		OurEstimate:           row.OurEstimate,
+		FrictionPct:           row.FrictionPct,
+		Reasoning:             row.Reasoning,
+		CreatedAt:             row.CreatedAt,
 	}
 }
