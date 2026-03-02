@@ -24,7 +24,7 @@ import (
 
 const defaultSyncConcurrency = 10
 
-var marketThresholdPattern = regexp.MustCompile(`(?i)(\d+(?:\.\d+)?)\s*°?\s*([FC])`)
+var marketThresholdPattern = regexp.MustCompile(`(?i)(?:above|below|over|under|exceed|at least|at most|no more than|no less than)[^0-9-]{0,24}(-?\d+(?:\.\d+)?)\s*°?\s*([FC])?`)
 
 type Service struct {
 	cfg   config.MarketConfig
@@ -321,7 +321,7 @@ func (s *Service) upsertMarket(ctx context.Context, gm GammaMarket) (*model.Mark
 			Valid:   true,
 		}
 	}
-	if thresholdOK && comparator != "" && gm.City != "" {
+	if thresholdOK && comparator != "" {
 		specStatus = "ready"
 	}
 
@@ -452,14 +452,17 @@ func nullDecimalFromFloat(v float64) decimal.NullDecimal {
 
 func parseQuestionThresholdF(question string) (float64, bool) {
 	matches := marketThresholdPattern.FindStringSubmatch(question)
-	if len(matches) < 3 {
+	if len(matches) < 2 {
 		return 0, false
 	}
 	value, err := strconv.ParseFloat(strings.TrimSpace(matches[1]), 64)
 	if err != nil {
 		return 0, false
 	}
-	unit := strings.ToUpper(strings.TrimSpace(matches[2]))
+	unit := "F"
+	if len(matches) >= 3 && strings.TrimSpace(matches[2]) != "" {
+		unit = strings.ToUpper(strings.TrimSpace(matches[2]))
+	}
 	if unit == "C" {
 		value = (value * 9.0 / 5.0) + 32.0
 	}

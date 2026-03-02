@@ -22,7 +22,7 @@ import (
 	"sky-alpha-pro/pkg/config"
 )
 
-var thresholdPattern = regexp.MustCompile(`(?i)(\d+(?:\.\d+)?)\s*°?\s*([FC])`)
+var thresholdPattern = regexp.MustCompile(`(?i)(?:above|below|over|under|exceed|at least|at most|no more than|no less than)[^0-9-]{0,24}(-?\d+(?:\.\d+)?)\s*°?\s*([FC])?`)
 
 type Service struct {
 	cfg config.SignalConfig
@@ -42,6 +42,7 @@ const (
 	skipReasonRawEdgeBelow       = "edge_below_raw_threshold"
 	skipReasonExecEdgeBelow      = "edge_below_exec_threshold"
 	skipReasonPersistFailed      = "persist_failed"
+	skipReasonUnsupportedMarket  = "unsupported_market_type"
 )
 
 type marketSpec struct {
@@ -78,7 +79,6 @@ func (s *Service) GenerateSignals(ctx context.Context, opts GenerateOptions) (*G
 	var markets []model.Market
 	if err := s.db.WithContext(ctx).
 		Where("is_active = ?", true).
-		Where("market_type IN ?", []string{"temperature_high", "temperature_low"}).
 		Order("end_date ASC").
 		Limit(limit).
 		Find(&markets).Error; err != nil {
@@ -269,6 +269,11 @@ func (s *Service) generateSignalForMarket(ctx context.Context, m model.Market, k
 		return eval, nil
 	}
 	eval.SpecReady = true
+	marketType := resolveMarketType(m.MarketType, spec.Comparator, m.Question)
+	if marketType == "" {
+		eval.SkipReason = skipReasonUnsupportedMarket
+		return eval, nil
+	}
 
 	var latestPrice model.MarketPrice
 	if err := s.db.WithContext(ctx).
@@ -284,7 +289,7 @@ func (s *Service) generateSignalForMarket(ctx context.Context, m model.Market, k
 		return eval, fmt.Errorf("invalid market price: %.4f", marketPrice)
 	}
 
-	sourceValues, err := s.loadForecastValues(ctx, spec.City, spec.TargetDate, m.MarketType)
+	sourceValues, err := s.loadForecastValues(ctx, spec.City, spec.TargetDate, marketType)
 	if err != nil {
 		return eval, err
 	}
@@ -299,7 +304,7 @@ func (s *Service) generateSignalForMarket(ctx context.Context, m model.Market, k
 		values = append(values, sv.Value)
 	}
 
-	ourEstimate := estimateProbability(values, spec.ThresholdF, m.MarketType, s.cfg.MinSigma)
+	ourEstimate := estimateProbability(values, spec.ThresholdF, marketType, s.cfg.MinSigma)
 	rawEdgePct := (ourEstimate - marketPrice) * 100.0
 	if math.Abs(rawEdgePct) < s.cfg.MinEdgePct {
 		eval.SkipReason = skipReasonRawEdgeBelow
@@ -404,7 +409,7 @@ func (s *Service) ensureMarketSpec(ctx context.Context, m model.Market, knownCit
 	if spec.City == "" {
 		return spec, skipReasonCityMissing, nil
 	}
-	if spec.Comparator == "" || spec.ThresholdF <= 0 || spec.TargetDate.IsZero() {
+	if spec.Comparator == "" || spec.TargetDate.IsZero() {
 		return spec, skipReasonSpecIncomplete, nil
 	}
 	spec.Status = "ready"
@@ -648,18 +653,44 @@ func buildReasoning(city string, thresholdF float64, targetDate time.Time, value
 
 func parseThresholdFahrenheit(question string) (float64, bool) {
 	matches := thresholdPattern.FindStringSubmatch(question)
-	if len(matches) < 3 {
+	if len(matches) < 2 {
 		return 0, false
 	}
 	value, err := strconvParseFloat(matches[1])
 	if err != nil {
 		return 0, false
 	}
-	unit := strings.ToUpper(matches[2])
+	unit := "F"
+	if len(matches) >= 3 && strings.TrimSpace(matches[2]) != "" {
+		unit = strings.ToUpper(matches[2])
+	}
 	if unit == "C" {
 		value = (value * 9.0 / 5.0) + 32.0
 	}
 	return value, true
+}
+
+func resolveMarketType(raw string, comparator string, question string) string {
+	mt := strings.TrimSpace(strings.ToLower(raw))
+	switch mt {
+	case "temperature_high", "temperature_low":
+		return mt
+	}
+	switch comparator {
+	case "ge":
+		return "temperature_high"
+	case "le":
+		return "temperature_low"
+	}
+	q := strings.ToLower(question)
+	switch {
+	case strings.Contains(q, "high temperature"), strings.Contains(q, "high temp"), strings.Contains(q, "above"), strings.Contains(q, "exceed"):
+		return "temperature_high"
+	case strings.Contains(q, "low temperature"), strings.Contains(q, "low temp"), strings.Contains(q, "below"), strings.Contains(q, "under"):
+		return "temperature_low"
+	default:
+		return ""
+	}
 }
 
 func estimateProbability(values []float64, threshold float64, marketType string, minSigma float64) float64 {
