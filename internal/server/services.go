@@ -38,6 +38,7 @@ func NewServicesWithMetrics(cfg *config.Config, log *zap.Logger, db *gorm.DB, me
 	agentSvc := agent.NewService(cfg.Agent, db, log, weatherSvc, signalSvc)
 	tradeSvc := trade.NewService(cfg.Trade, cfg.Market, db, log, signalSvc)
 	chainSvc := chain.NewService(cfg.Chain, db, log)
+	agentSvc.SetToolServices(marketSvc, chainSvc)
 	if chainSvc != nil {
 		chainSvc.SetMetrics(metricReg)
 	}

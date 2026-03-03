@@ -12,6 +12,7 @@ import (
 	"golang.org/x/sync/errgroup"
 	"gorm.io/gorm"
 
+	"sky-alpha-pro/internal/agent"
 	"sky-alpha-pro/internal/chain"
 	"sky-alpha-pro/internal/market"
 	"sky-alpha-pro/internal/model"
@@ -20,7 +21,7 @@ import (
 	"sky-alpha-pro/pkg/config"
 )
 
-func RegisterDefaultJobs(mgr *Manager, cfg *config.Config, db *gorm.DB, marketSvc *market.Service, weatherSvc *weather.Service, chainSvc *chain.Service, simSvc *sim.Service, log *zap.Logger) {
+func RegisterDefaultJobs(mgr *Manager, cfg *config.Config, db *gorm.DB, marketSvc *market.Service, weatherSvc *weather.Service, chainSvc *chain.Service, simSvc *sim.Service, agentSvc *agent.Service, log *zap.Logger) {
 	if mgr == nil || cfg == nil {
 		return
 	}
@@ -246,6 +247,71 @@ func RegisterDefaultJobs(mgr *Manager, cfg *config.Config, db *gorm.DB, marketSv
 					out.Records = append(out.Records, FetchRecord{Entity: "sim_errors", Result: "error", Count: len(res.Errors)})
 				}
 				out.Freshness = map[string]float64{"signals": 0}
+				return out, nil
+			},
+		})
+	}
+
+	ac := cfg.Scheduler.Jobs.AgentCycle
+	if ac.Enabled && ac.Interval > 0 && agentSvc != nil {
+		mgr.Register(Job{
+			Name:      "agent_cycle",
+			Interval:  ac.Interval,
+			Timeout:   ac.Timeout,
+			Immediate: ac.Immediate,
+			Run: func(ctx context.Context) (JobResult, error) {
+				res, err := agentSvc.RunCycle(ctx, agent.CycleOptions{
+					RunMode:             ac.RunMode,
+					TradeEnabled:        ac.TradeEnabled,
+					MaxToolCalls:        ac.MaxToolCalls,
+					MaxExternalRequests: ac.MaxExternalRequests,
+					MemoryWindow:        ac.MemoryWindow,
+					MarketLimit:         ac.MarketLimit,
+				})
+				if err != nil {
+					return JobResult{}, err
+				}
+				out := JobResult{
+					Records:   make([]FetchRecord, 0, len(res.Records)+1),
+					Freshness: res.Freshness,
+				}
+				for _, rec := range res.Records {
+					out.Records = append(out.Records, FetchRecord{
+						Entity: rec.Entity,
+						Result: rec.Result,
+						Count:  rec.Count,
+					})
+				}
+				out.Records = append(out.Records, FetchRecord{Entity: "llm_calls", Result: "success", Count: res.LLMCalls})
+				for _, issue := range res.Errors {
+					out.Errors = append(out.Errors, JobIssue{
+						Code:    issue.Code,
+						Message: issue.Message,
+						Source:  issue.Source,
+						Count:   issue.Count,
+					})
+				}
+				for _, warn := range res.Warnings {
+					out.Warnings = append(out.Warnings, JobIssue{
+						Code:    warn.Code,
+						Message: warn.Message,
+						Source:  warn.Source,
+						Count:   warn.Count,
+					})
+				}
+				if res.Status == "skipped_no_input" {
+					out.SkipReason = res.SkipReason
+				}
+				if res.Status == "error" {
+					msg := strings.TrimSpace(res.SkipReason)
+					if msg == "" && len(res.Errors) > 0 {
+						msg = strings.TrimSpace(res.Errors[0].Message)
+					}
+					if msg == "" {
+						msg = "agent cycle failed"
+					}
+					return out, fmt.Errorf("agent cycle failed: %s", msg)
+				}
 				return out, nil
 			},
 		})

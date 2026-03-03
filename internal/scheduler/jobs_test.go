@@ -25,7 +25,7 @@ func TestRegisterDefaultJobsRegistersChainScanWithSkipFallbackWhenRPCEmpty(t *te
 	cfg.Chain.RPCURL = ""
 
 	mgr := NewManager(cfg.Scheduler, zap.NewNop(), nil)
-	RegisterDefaultJobs(mgr, cfg, nil, nil, nil, &chain.Service{}, nil, zap.NewNop())
+	RegisterDefaultJobs(mgr, cfg, nil, nil, nil, &chain.Service{}, nil, nil, zap.NewNop())
 	found := false
 	for _, job := range mgr.jobs {
 		if job.name == "chain_scan" {

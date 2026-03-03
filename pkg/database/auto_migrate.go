@@ -28,6 +28,10 @@ func AutoMigrate(db *gorm.DB) error {
 		&model.PlayerPosition{},
 		&model.WeatherStation{},
 		&model.AgentLog{},
+		&model.PromptVersion{},
+		&model.AgentSession{},
+		&model.AgentStep{},
+		&model.AgentMemory{},
 		&model.SchedulerRun{},
 	)
 }

@@ -244,6 +244,73 @@ type AgentLog struct {
 	CreatedAt        time.Time      `gorm:"column:created_at;not null;index:idx_agent_logs_session,priority:2;index:idx_agent_logs_market,sort:desc,priority:2"`
 }
 
+type PromptVersion struct {
+	ID              uint64         `gorm:"column:id;primaryKey;autoIncrement"`
+	Name            string         `gorm:"column:name;size:80;not null;index:idx_prompt_versions_name_ver,priority:1"`
+	Version         string         `gorm:"column:version;size:40;not null;index:idx_prompt_versions_name_ver,priority:2"`
+	SystemPrompt    string         `gorm:"column:system_prompt;type:text;not null"`
+	RuntimeTemplate string         `gorm:"column:runtime_template;type:text;not null"`
+	ContextTemplate string         `gorm:"column:context_template;type:text;not null"`
+	SchemaJSON      datatypes.JSON `gorm:"column:schema_json;type:jsonb"`
+	IsActive        bool           `gorm:"column:is_active;default:false;index:idx_prompt_versions_active"`
+	CreatedAt       time.Time      `gorm:"column:created_at;not null"`
+	UpdatedAt       time.Time      `gorm:"column:updated_at"`
+}
+
+type AgentSession struct {
+	ID               string         `gorm:"column:id;type:uuid;primaryKey"`
+	CycleID          string         `gorm:"column:cycle_id;size:64;index:idx_agent_sessions_cycle"`
+	PromptVersion    string         `gorm:"column:prompt_version;size:40;not null"`
+	RunMode          string         `gorm:"column:run_mode;size:20;not null"`
+	Model            string         `gorm:"column:model;size:80"`
+	Status           string         `gorm:"column:status;size:20;not null;index:idx_agent_sessions_status"`
+	Decision         string         `gorm:"column:decision;size:20"`
+	LLMCalls         int            `gorm:"column:llm_calls;default:0"`
+	ToolCalls        int            `gorm:"column:tool_calls;default:0"`
+	RecordsSuccess   int            `gorm:"column:records_success;default:0"`
+	RecordsError     int            `gorm:"column:records_error;default:0"`
+	RecordsSkipped   int            `gorm:"column:records_skipped;default:0"`
+	ErrorCode        string         `gorm:"column:error_code;size:80"`
+	ErrorMessage     string         `gorm:"column:error_message;type:text"`
+	InputContextJSON datatypes.JSON `gorm:"column:input_context_json;type:jsonb"`
+	OutputPlanJSON   datatypes.JSON `gorm:"column:output_plan_json;type:jsonb"`
+	SummaryJSON      datatypes.JSON `gorm:"column:summary_json;type:jsonb"`
+	StartedAt        time.Time      `gorm:"column:started_at;not null;index:idx_agent_sessions_started_at,sort:desc"`
+	FinishedAt       time.Time      `gorm:"column:finished_at;not null"`
+	DurationMS       int            `gorm:"column:duration_ms;not null"`
+	CreatedAt        time.Time      `gorm:"column:created_at;not null"`
+	UpdatedAt        time.Time      `gorm:"column:updated_at"`
+}
+
+type AgentStep struct {
+	ID          uint64         `gorm:"column:id;primaryKey;autoIncrement"`
+	SessionID   string         `gorm:"column:session_id;type:uuid;not null;index:idx_agent_steps_session_step,priority:1"`
+	StepNo      int            `gorm:"column:step_no;not null;index:idx_agent_steps_session_step,priority:2"`
+	Tool        string         `gorm:"column:tool;size:80;not null"`
+	Status      string         `gorm:"column:status;size:20;not null;index:idx_agent_steps_status"`
+	OnFail      string         `gorm:"column:on_fail;size:20"`
+	ErrorCode   string         `gorm:"column:error_code;size:80"`
+	ErrorDetail string         `gorm:"column:error_detail;type:text"`
+	ArgsJSON    datatypes.JSON `gorm:"column:args_json;type:jsonb"`
+	ResultJSON  datatypes.JSON `gorm:"column:result_json;type:jsonb"`
+	StartedAt   time.Time      `gorm:"column:started_at;not null"`
+	FinishedAt  time.Time      `gorm:"column:finished_at;not null"`
+	DurationMS  int            `gorm:"column:duration_ms;not null"`
+	CreatedAt   time.Time      `gorm:"column:created_at;not null"`
+}
+
+type AgentMemory struct {
+	ID             uint64         `gorm:"column:id;primaryKey;autoIncrement"`
+	SessionID      string         `gorm:"column:session_id;type:uuid;not null;index:idx_agent_memories_session"`
+	CycleID        string         `gorm:"column:cycle_id;size:64;index:idx_agent_memories_cycle"`
+	Outcome        string         `gorm:"column:outcome;size:20;not null"`
+	KeyFailures    datatypes.JSON `gorm:"column:key_failures_json;type:jsonb"`
+	FunnelSummary  datatypes.JSON `gorm:"column:funnel_summary_json;type:jsonb"`
+	ActionSuggests datatypes.JSON `gorm:"column:action_suggestions_json;type:jsonb"`
+	ExecutionJSON  datatypes.JSON `gorm:"column:execution_outcome_json;type:jsonb"`
+	CreatedAt      time.Time      `gorm:"column:created_at;not null;index:idx_agent_memories_created,sort:desc"`
+}
+
 type SchedulerRun struct {
 	ID             uint64         `gorm:"column:id;primaryKey;autoIncrement"`
 	JobName        string         `gorm:"column:job_name;size:80;not null;index:idx_scheduler_runs_job_time,priority:1"`
