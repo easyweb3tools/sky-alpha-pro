@@ -273,7 +273,7 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("agent.vertex_location", "us-central1")
 	v.SetDefault("agent.vertex_model", "gemini-2.5-pro")
 	v.SetDefault("agent.vertex_temperature", 0.2)
-	v.SetDefault("agent.vertex_max_output_tokens", 600)
+	v.SetDefault("agent.vertex_max_output_tokens", 2048)
 	v.SetDefault("agent.vertex_timeout", "15s")
 
 	v.SetDefault("trade.private_key", "")

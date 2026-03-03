@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -14,6 +15,7 @@ import (
 	"go.uber.org/zap"
 	"golang.org/x/sync/errgroup"
 	"gorm.io/datatypes"
+	"gorm.io/gorm"
 
 	"sky-alpha-pro/internal/chain"
 	"sky-alpha-pro/internal/model"
@@ -28,10 +30,12 @@ const (
 	defaultCycleExternalReqBudget   = 200
 	defaultCycleMemoryWindow        = 3
 	defaultCycleMarketLimit         = 300
+	defaultCycleAdvisoryLockKey     = int64(739001)
 	cycleStatusOK                   = "success"
 	cycleStatusDegraded             = "degraded"
 	cycleStatusError                = "error"
 	cycleStatusSkipped              = "skipped_no_input"
+	cycleSkipLocked                 = "agent_cycle_locked"
 	issueCodeToolUnavailable        = "tool_unavailable"
 	issueCodeToolUnknown            = "tool_unknown"
 	issueCodeCitiesEmpty            = "empty_city_set"
@@ -129,16 +133,61 @@ type cycleStepExecution struct {
 	Meta             map[string]any
 }
 
+type cyclePromptBundle struct {
+	Version string
+	System  string
+}
+
 func (s *Service) RunCycle(ctx context.Context, opts CycleOptions) (*CycleResult, error) {
 	started := time.Now().UTC()
 	options := normalizeCycleOptions(opts)
 	if options.CycleID == "" {
 		options.CycleID = fmt.Sprintf("cycle-%s", started.Format("20060102T150405Z"))
 	}
+	unlock, locked, lockErr := s.acquireCycleLock(ctx)
+	if lockErr != nil {
+		return nil, lockErr
+	}
+	if !locked {
+		finished := time.Now().UTC()
+		res := &CycleResult{
+			SessionID:  uuid.NewString(),
+			CycleID:    options.CycleID,
+			RunMode:    options.RunMode,
+			Decision:   "skip",
+			Status:     cycleStatusSkipped,
+			SkipReason: cycleSkipLocked,
+			Records:    []CycleRecord{{Entity: "agent_cycle", Result: "skipped", Count: 1}},
+			Errors: []CycleIssue{{
+				Code:    cycleSkipLocked,
+				Message: "agent cycle lock is held by another runner",
+				Source:  "agent_cycle",
+				Count:   1,
+			}},
+			StartedAt:  started,
+			FinishedAt: finished,
+			DurationMS: finished.Sub(started).Milliseconds(),
+		}
+		s.observeCycleMetrics(res, "")
+		return res, nil
+	}
+	defer unlock()
+
+	promptBundle, err := s.loadPromptBundle(ctx)
+	if err != nil {
+		if s.log != nil {
+			s.log.Warn("load prompt bundle failed; fallback to built-in prompt", zap.Error(err))
+		}
+		promptBundle = cyclePromptBundle{Version: defaultCyclePromptVersion, System: cycleSystemPrompt}
+	}
 
 	input, err := s.buildCyclePromptInput(ctx, options)
 	if err != nil {
 		return nil, err
+	}
+	input.PromptVersion = promptBundle.Version
+	if s.metrics != nil && len(input.MemorySummary) > 0 {
+		s.metrics.AddAgentMemoryHits(len(input.MemorySummary))
 	}
 
 	result := &CycleResult{
@@ -153,7 +202,7 @@ func (s *Service) RunCycle(ctx context.Context, opts CycleOptions) (*CycleResult
 		StartedAt: started,
 	}
 
-	plan, modelName := s.buildPlan(ctx, input, result)
+	plan, modelName, fallbackReason := s.buildPlan(ctx, input, promptBundle.System, result)
 	if planErr := validatePlan(plan); planErr != nil {
 		result.Warnings = append(result.Warnings, CycleIssue{
 			Code:    issueCodePlanValidationFailed,
@@ -162,6 +211,9 @@ func (s *Service) RunCycle(ctx context.Context, opts CycleOptions) (*CycleResult
 			Count:   1,
 		})
 		plan = s.buildFallbackPlan(input)
+		if fallbackReason == "" {
+			fallbackReason = "plan_validation_failed"
+		}
 	}
 	result.Decision = strings.TrimSpace(plan.Decision)
 	if result.Decision == "" {
@@ -268,8 +320,9 @@ func (s *Service) RunCycle(ctx context.Context, opts CycleOptions) (*CycleResult
 	result.FinishedAt = time.Now().UTC()
 	result.DurationMS = result.FinishedAt.Sub(result.StartedAt).Milliseconds()
 
-	s.persistCycleSession(ctx, result, input, plan, funnel)
+	s.persistCycleSession(ctx, result, input, promptBundle.Version, plan, funnel)
 	s.persistCycleMemory(ctx, result, plan, funnel)
+	s.observeCycleMetrics(result, fallbackReason)
 	return result, nil
 }
 
@@ -363,13 +416,13 @@ func (s *Service) buildCyclePromptInput(ctx context.Context, opts CycleOptions) 
 	return input, nil
 }
 
-func (s *Service) buildPlan(ctx context.Context, input cyclePromptInput, result *CycleResult) (cyclePlanOutput, string) {
+func (s *Service) buildPlan(ctx context.Context, input cyclePromptInput, systemPrompt string, result *CycleResult) (cyclePlanOutput, string, string) {
 	modelName := ""
 	if s.vertexAI == nil {
-		return s.buildFallbackPlan(input), modelName
+		return s.buildFallbackPlan(input), modelName, "vertex_unavailable"
 	}
 	result.LLMCalls++
-	plan, err := s.vertexAI.PlanCycle(ctx, input)
+	plan, err := s.vertexAI.PlanCycle(ctx, input, systemPrompt)
 	if err != nil {
 		result.Warnings = append(result.Warnings, CycleIssue{
 			Code:    issueCodePlanDecodeFailed,
@@ -377,10 +430,10 @@ func (s *Service) buildPlan(ctx context.Context, input cyclePromptInput, result 
 			Source:  "vertex_ai",
 			Count:   1,
 		})
-		return s.buildFallbackPlan(input), modelName
+		return s.buildFallbackPlan(input), modelName, "plan_decode_failed"
 	}
 	modelName = s.vertexAI.ModelName()
-	return *plan, modelName
+	return *plan, modelName, ""
 }
 
 func (s *Service) buildFallbackPlan(input cyclePromptInput) cyclePlanOutput {
@@ -811,7 +864,7 @@ func unavailableToolExec(tool string) cycleStepExecution {
 	}
 }
 
-func (s *Service) persistCycleSession(ctx context.Context, result *CycleResult, input cyclePromptInput, plan cyclePlanOutput, funnel map[string]any) {
+func (s *Service) persistCycleSession(ctx context.Context, result *CycleResult, input cyclePromptInput, promptVersion string, plan cyclePlanOutput, funnel map[string]any) {
 	if s.db == nil || result == nil {
 		return
 	}
@@ -826,7 +879,7 @@ func (s *Service) persistCycleSession(ctx context.Context, result *CycleResult, 
 	row := model.AgentSession{
 		ID:               result.SessionID,
 		CycleID:          result.CycleID,
-		PromptVersion:    defaultCyclePromptVersion,
+		PromptVersion:    promptVersion,
 		RunMode:          result.RunMode,
 		Model:            result.Model,
 		Status:           result.Status,
@@ -961,6 +1014,73 @@ func (s *Service) loadRecentMemories(ctx context.Context, window int) ([]cyclePr
 	return out, nil
 }
 
+func (s *Service) loadPromptBundle(ctx context.Context) (cyclePromptBundle, error) {
+	bundle := cyclePromptBundle{
+		Version: defaultCyclePromptVersion,
+		System:  cycleSystemPrompt,
+	}
+	if s.db == nil {
+		return bundle, nil
+	}
+	var row model.PromptVersion
+	err := s.db.WithContext(ctx).
+		Where("is_active = ?", true).
+		Order("updated_at DESC, id DESC").
+		Limit(1).
+		Take(&row).Error
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return bundle, nil
+		}
+		msg := strings.ToLower(err.Error())
+		if strings.Contains(msg, "no such table") || strings.Contains(msg, "does not exist") {
+			return bundle, nil
+		}
+		return bundle, err
+	}
+	version := strings.TrimSpace(row.Version)
+	if version != "" {
+		bundle.Version = version
+	}
+	system := strings.TrimSpace(row.SystemPrompt)
+	if system != "" {
+		bundle.System = system
+	}
+	return bundle, nil
+}
+
+func (s *Service) acquireCycleLock(ctx context.Context) (unlock func(), acquired bool, err error) {
+	if s.db == nil {
+		if !s.cycleMu.TryLock() {
+			return nil, false, nil
+		}
+		return s.cycleMu.Unlock, true, nil
+	}
+	if strings.EqualFold(s.db.Dialector.Name(), "postgres") {
+		var ok bool
+		if err := s.db.WithContext(ctx).
+			Raw("SELECT pg_try_advisory_lock(?)", defaultCycleAdvisoryLockKey).
+			Scan(&ok).Error; err != nil {
+			return nil, false, err
+		}
+		if !ok {
+			return nil, false, nil
+		}
+		unlockFn := func() {
+			releaseCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+			defer cancel()
+			_ = s.db.WithContext(releaseCtx).
+				Exec("SELECT pg_advisory_unlock(?)", defaultCycleAdvisoryLockKey).Error
+		}
+		return unlockFn, true, nil
+	}
+
+	if !s.cycleMu.TryLock() {
+		return nil, false, nil
+	}
+	return s.cycleMu.Unlock, true, nil
+}
+
 func (s *Service) countRows(ctx context.Context, table string, where string) (int, error) {
 	var count int64
 	query := s.db.WithContext(ctx).Table(table)
@@ -975,6 +1095,19 @@ func (s *Service) countRows(ctx context.Context, table string, where string) (in
 
 func (s *Service) maxTimeRFC3339(ctx context.Context, table string, column string, where string) string {
 	if s.db == nil {
+		return ""
+	}
+	allowed := map[string]map[string]struct{}{
+		"markets":           {"updated_at": {}},
+		"market_prices":     {"captured_at": {}},
+		"forecasts":         {"fetched_at": {}},
+		"competitor_trades": {"timestamp": {}},
+	}
+	columns, ok := allowed[table]
+	if !ok {
+		return ""
+	}
+	if _, ok := columns[column]; !ok {
 		return ""
 	}
 	var v sql.NullTime
@@ -1004,6 +1137,26 @@ func summarizeCycleRecords(records []CycleRecord) (success, failed, skipped int)
 		}
 	}
 	return success, failed, skipped
+}
+
+func (s *Service) observeCycleMetrics(result *CycleResult, fallbackReason string) {
+	if s == nil || s.metrics == nil || result == nil {
+		return
+	}
+	s.metrics.ObserveAgentCycle(result.Status, result.Decision, result.FinishedAt.Sub(result.StartedAt), result.LLMCalls)
+	if fallbackReason != "" {
+		s.metrics.AddAgentCycleFallback(fallbackReason, 1)
+	}
+	for _, issue := range result.Errors {
+		s.metrics.AddAgentCycleToolError(issue.Source, issue.Code, max(issue.Count, 1))
+	}
+	for _, issue := range result.Warnings {
+		// warnings are informative; only count explicit tool issues with code.
+		if strings.TrimSpace(issue.Code) == "" {
+			continue
+		}
+		s.metrics.AddAgentCycleToolError(issue.Source, issue.Code, max(issue.Count, 1))
+	}
 }
 
 func mergeFreshness(dst map[string]float64, src map[string]float64) {

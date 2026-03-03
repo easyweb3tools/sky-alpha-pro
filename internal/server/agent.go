@@ -13,7 +13,6 @@ import (
 )
 
 var agentAnalyzeMu sync.Mutex
-var agentCycleMu sync.Mutex
 
 type analyzeAgentRequest struct {
 	MarketID string `json:"market_id"`
@@ -131,14 +130,6 @@ func GetAgentSignalHandler(svc *signal.Service) gin.HandlerFunc {
 
 func RunAgentCycleHandler(svc *agent.Service) gin.HandlerFunc {
 	return func(c *gin.Context) {
-		if !agentCycleMu.TryLock() {
-			c.JSON(http.StatusConflict, gin.H{
-				"error": gin.H{"code": "AGENT_CYCLE_RUNNING", "message": "agent cycle already running"},
-			})
-			return
-		}
-		defer agentCycleMu.Unlock()
-
 		var body runAgentCycleRequest
 		if c.Request.ContentLength > 0 {
 			if err := c.ShouldBindJSON(&body); err != nil {

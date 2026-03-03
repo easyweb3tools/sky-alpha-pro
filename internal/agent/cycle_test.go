@@ -13,7 +13,9 @@ import (
 	"sky-alpha-pro/internal/model"
 )
 
-func TestRunCycleFallbackPersistsSessionAndMemory(t *testing.T) {
+func setupCycleTestDB(t *testing.T) *gorm.DB {
+	t.Helper()
+
 	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{
 		Logger: logger.Default.LogMode(logger.Silent),
 	})
@@ -109,12 +111,29 @@ func TestRunCycleFallbackPersistsSessionAndMemory(t *testing.T) {
 			execution_outcome_json TEXT,
 			created_at DATETIME
 		)`,
+		`CREATE TABLE prompt_versions (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			name TEXT,
+			version TEXT,
+			system_prompt TEXT,
+			runtime_template TEXT,
+			context_template TEXT,
+			schema_json TEXT,
+			is_active BOOLEAN,
+			created_at DATETIME,
+			updated_at DATETIME
+		)`,
 	}
 	for _, ddl := range ddls {
 		if err := db.Exec(ddl).Error; err != nil {
 			t.Fatalf("create table failed: %v", err)
 		}
 	}
+	return db
+}
+
+func TestRunCycleFallbackPersistsSessionAndMemory(t *testing.T) {
+	db := setupCycleTestDB(t)
 
 	now := time.Now().UTC()
 	if err := db.Exec(
@@ -139,9 +158,7 @@ func TestRunCycleFallbackPersistsSessionAndMemory(t *testing.T) {
 		log: zap.NewNop(),
 	}
 
-	res, err := svc.RunCycle(context.Background(), CycleOptions{
-		RunMode: "observe",
-	})
+	res, err := svc.RunCycle(context.Background(), CycleOptions{RunMode: "observe"})
 	if err != nil {
 		t.Fatalf("run cycle: %v", err)
 	}
@@ -175,5 +192,51 @@ func TestRunCycleFallbackPersistsSessionAndMemory(t *testing.T) {
 	}
 	if memories != 1 {
 		t.Fatalf("expected 1 agent_memory, got=%d", memories)
+	}
+}
+
+func TestRunCycleUsesActivePromptVersion(t *testing.T) {
+	db := setupCycleTestDB(t)
+	now := time.Now().UTC()
+
+	if err := db.Exec(
+		`INSERT INTO prompt_versions(name, version, system_prompt, runtime_template, context_template, schema_json, is_active, created_at, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		"agent_cycle", "v1.2.3", "custom system prompt", "{}", "{}", "{}", true, now, now,
+	).Error; err != nil {
+		t.Fatalf("insert prompt version: %v", err)
+	}
+	if err := db.Exec(
+		`INSERT INTO markets(id, polymarket_id, question, city, market_type, spec_status, end_date, is_active, created_at, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		"00000000-0000-0000-0000-000000000002",
+		"poly-test-2",
+		"Will Chicago high exceed 40F tomorrow?",
+		"chicago",
+		"temperature_high",
+		"ready",
+		now.Add(24*time.Hour),
+		true,
+		now,
+		now,
+	).Error; err != nil {
+		t.Fatalf("insert market: %v", err)
+	}
+
+	svc := &Service{
+		db:  db,
+		log: zap.NewNop(),
+	}
+	res, err := svc.RunCycle(context.Background(), CycleOptions{RunMode: "observe"})
+	if err != nil {
+		t.Fatalf("run cycle: %v", err)
+	}
+
+	var row model.AgentSession
+	if err := db.Where("id = ?", res.SessionID).Take(&row).Error; err != nil {
+		t.Fatalf("load agent_session: %v", err)
+	}
+	if row.PromptVersion != "v1.2.3" {
+		t.Fatalf("expected prompt_version=v1.2.3 got=%s", row.PromptVersion)
 	}
 }

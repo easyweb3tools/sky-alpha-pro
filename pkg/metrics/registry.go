@@ -31,6 +31,12 @@ type Registry struct {
 	chainRPCRequestsTotal   *prometheus.CounterVec
 	chainRPCDurationSeconds *prometheus.HistogramVec
 	chainRPCRequestsPerSec  *prometheus.GaugeVec
+	agentCycleRunsTotal     *prometheus.CounterVec
+	agentCycleDuration      *prometheus.HistogramVec
+	agentCycleLLMCalls      prometheus.Histogram
+	agentCycleToolErrors    *prometheus.CounterVec
+	agentCycleFallbackTotal *prometheus.CounterVec
+	agentMemoryHitTotal     prometheus.Counter
 
 	cacheMu               sync.RWMutex
 	dataFreshnessSnapshot map[string]float64
@@ -129,6 +135,44 @@ func New(cfg config.MetricsConfig) *Registry {
 			Name:      "rpc_requests_per_second",
 			Help:      "In-process per-second chain RPC request count grouped by method and status.",
 		}, []string{"method", "status"}),
+		agentCycleRunsTotal: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Namespace: "sky_alpha",
+			Subsystem: "agent",
+			Name:      "cycle_runs_total",
+			Help:      "Total agent cycle runs grouped by status and decision.",
+		}, []string{"status", "decision"}),
+		agentCycleDuration: prometheus.NewHistogramVec(prometheus.HistogramOpts{
+			Namespace: "sky_alpha",
+			Subsystem: "agent",
+			Name:      "cycle_duration_seconds",
+			Help:      "Agent cycle duration in seconds grouped by status.",
+			Buckets:   []float64{0.05, 0.1, 0.25, 0.5, 1, 2, 5, 10, 20, 30, 60, 120},
+		}, []string{"status"}),
+		agentCycleLLMCalls: prometheus.NewHistogram(prometheus.HistogramOpts{
+			Namespace: "sky_alpha",
+			Subsystem: "agent",
+			Name:      "cycle_llm_calls",
+			Help:      "LLM calls per agent cycle.",
+			Buckets:   []float64{0, 1, 2, 3, 5, 8},
+		}),
+		agentCycleToolErrors: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Namespace: "sky_alpha",
+			Subsystem: "agent",
+			Name:      "cycle_tool_errors_total",
+			Help:      "Agent cycle tool errors grouped by tool and error_code.",
+		}, []string{"tool", "error_code"}),
+		agentCycleFallbackTotal: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Namespace: "sky_alpha",
+			Subsystem: "agent",
+			Name:      "cycle_fallback_total",
+			Help:      "Fallback planning count grouped by reason.",
+		}, []string{"reason"}),
+		agentMemoryHitTotal: prometheus.NewCounter(prometheus.CounterOpts{
+			Namespace: "sky_alpha",
+			Subsystem: "agent",
+			Name:      "memory_hit_total",
+			Help:      "Total memory summaries injected into agent cycle context.",
+		}),
 		dataFreshnessSeconds: prometheus.NewGaugeVec(prometheus.GaugeOpts{
 			Namespace: "sky_alpha",
 			Subsystem: "data",
@@ -154,6 +198,12 @@ func New(cfg config.MetricsConfig) *Registry {
 		r.chainRPCRequestsTotal,
 		r.chainRPCDurationSeconds,
 		r.chainRPCRequestsPerSec,
+		r.agentCycleRunsTotal,
+		r.agentCycleDuration,
+		r.agentCycleLLMCalls,
+		r.agentCycleToolErrors,
+		r.agentCycleFallbackTotal,
+		r.agentMemoryHitTotal,
 		r.dataFreshnessSeconds,
 	)
 	return r
@@ -280,6 +330,56 @@ func (r *Registry) SetDataFreshness(dataset string, seconds float64) {
 	r.cacheMu.Lock()
 	r.dataFreshnessSnapshot[dataset] = seconds
 	r.cacheMu.Unlock()
+}
+
+func (r *Registry) ObserveAgentCycle(status, decision string, duration time.Duration, llmCalls int) {
+	if !r.Enabled() {
+		return
+	}
+	s := strings.TrimSpace(status)
+	if s == "" {
+		s = "unknown"
+	}
+	d := strings.TrimSpace(decision)
+	if d == "" {
+		d = "unknown"
+	}
+	r.agentCycleRunsTotal.WithLabelValues(s, d).Inc()
+	r.agentCycleDuration.WithLabelValues(s).Observe(duration.Seconds())
+	r.agentCycleLLMCalls.Observe(float64(llmCalls))
+}
+
+func (r *Registry) AddAgentCycleToolError(tool, errorCode string, n int) {
+	if !r.Enabled() || n <= 0 {
+		return
+	}
+	t := strings.TrimSpace(tool)
+	if t == "" {
+		t = "unknown_tool"
+	}
+	code := strings.TrimSpace(errorCode)
+	if code == "" {
+		code = "unknown_error"
+	}
+	r.agentCycleToolErrors.WithLabelValues(t, code).Add(float64(n))
+}
+
+func (r *Registry) AddAgentCycleFallback(reason string, n int) {
+	if !r.Enabled() || n <= 0 {
+		return
+	}
+	rsn := strings.TrimSpace(reason)
+	if rsn == "" {
+		rsn = "unknown"
+	}
+	r.agentCycleFallbackTotal.WithLabelValues(rsn).Add(float64(n))
+}
+
+func (r *Registry) AddAgentMemoryHits(n int) {
+	if !r.Enabled() || n <= 0 {
+		return
+	}
+	r.agentMemoryHitTotal.Add(float64(n))
 }
 
 func (r *Registry) SnapshotDataFreshness() map[string]float64 {

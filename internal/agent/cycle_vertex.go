@@ -19,9 +19,13 @@ Rules:
 3) Do not use trade.place.batch when trade_enabled=false.
 4) Keep plan concise (<= 8 steps).`
 
-func (v *vertexAIClient) PlanCycle(ctx context.Context, input cyclePromptInput) (*cyclePlanOutput, error) {
+func (v *vertexAIClient) PlanCycle(ctx context.Context, input cyclePromptInput, systemPrompt string) (*cyclePlanOutput, error) {
 	if v == nil || v.client == nil {
 		return nil, fmt.Errorf("vertex ai client is not configured")
+	}
+	sys := strings.TrimSpace(systemPrompt)
+	if sys == "" {
+		sys = cycleSystemPrompt
 	}
 
 	callCtx := ctx
@@ -41,7 +45,7 @@ func (v *vertexAIClient) PlanCycle(ctx context.Context, input cyclePromptInput) 
 		v.model,
 		genai.Text(buildCyclePlanPrompt(string(promptBody))),
 		&genai.GenerateContentConfig{
-			SystemInstruction: genai.NewContentFromText(cycleSystemPrompt, genai.RoleUser),
+			SystemInstruction: genai.NewContentFromText(sys, genai.RoleUser),
 			Temperature:       genai.Ptr(v.temperature),
 			MaxOutputTokens:   int32(v.maxOutputTokens),
 			ResponseMIMEType:  "application/json",

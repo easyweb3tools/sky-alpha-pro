@@ -36,6 +36,7 @@ func NewServicesWithMetrics(cfg *config.Config, log *zap.Logger, db *gorm.DB, me
 	weatherSvc := weather.NewService(cfg.Weather, db, log)
 	signalSvc := signal.NewService(cfg.Signal, db, log)
 	agentSvc := agent.NewService(cfg.Agent, db, log, weatherSvc, signalSvc)
+	agentSvc.SetMetrics(metricReg)
 	tradeSvc := trade.NewService(cfg.Trade, cfg.Market, db, log, signalSvc)
 	chainSvc := chain.NewService(cfg.Chain, db, log)
 	agentSvc.SetToolServices(marketSvc, chainSvc)
