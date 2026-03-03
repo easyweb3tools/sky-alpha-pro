@@ -311,6 +311,19 @@ type AgentMemory struct {
 	CreatedAt      time.Time      `gorm:"column:created_at;not null;index:idx_agent_memories_created,sort:desc"`
 }
 
+type AgentReport struct {
+	ID          uint64         `gorm:"column:id;primaryKey;autoIncrement"`
+	SessionID   string         `gorm:"column:session_id;type:uuid;not null;index:idx_agent_reports_session,priority:1"`
+	CycleID     string         `gorm:"column:cycle_id;size:64;index:idx_agent_reports_cycle"`
+	RunMode     string         `gorm:"column:run_mode;size:20;not null"`
+	Decision    string         `gorm:"column:decision;size:20"`
+	Status      string         `gorm:"column:status;size:20;not null;index:idx_agent_reports_status"`
+	SummaryJSON datatypes.JSON `gorm:"column:summary_json;type:jsonb"`
+	FunnelJSON  datatypes.JSON `gorm:"column:funnel_json;type:jsonb"`
+	CreatedAt   time.Time      `gorm:"column:created_at;not null;index:idx_agent_reports_session,sort:desc,priority:2"`
+	UpdatedAt   time.Time      `gorm:"column:updated_at"`
+}
+
 type SchedulerRun struct {
 	ID             uint64         `gorm:"column:id;primaryKey;autoIncrement"`
 	JobName        string         `gorm:"column:job_name;size:80;not null;index:idx_scheduler_runs_job_time,priority:1"`

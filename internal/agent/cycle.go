@@ -234,6 +234,7 @@ func (s *Service) RunCycle(ctx context.Context, opts CycleOptions) (*CycleResult
 
 	externalUsed := 0
 	funnel := map[string]any{}
+	var reportID uint64
 	for _, step := range sortPlanSteps(plan.Plan) {
 		if result.ToolCalls >= options.MaxToolCalls {
 			result.Warnings = append(result.Warnings, CycleIssue{
@@ -264,7 +265,7 @@ func (s *Service) RunCycle(ctx context.Context, opts CycleOptions) (*CycleResult
 		var stepErr error
 		stepStarted := time.Now().UTC()
 		for attempt := 1; attempt <= attempts; attempt++ {
-			exec, stepErr = s.executePlanStep(ctx, step, options)
+			exec, stepErr = s.executePlanStep(ctx, step, options, result, funnel)
 			if stepErr == nil || attempt == attempts {
 				break
 			}
@@ -284,6 +285,20 @@ func (s *Service) RunCycle(ctx context.Context, opts CycleOptions) (*CycleResult
 		if sf, ok := exec.Meta["signal_funnel"]; ok {
 			if m, ok := sf.(map[string]any); ok {
 				funnel = m
+			}
+		}
+		if rid, ok := exec.Meta["report_id"]; ok {
+			switch v := rid.(type) {
+			case uint64:
+				reportID = v
+			case int:
+				if v > 0 {
+					reportID = uint64(v)
+				}
+			case float64:
+				if v > 0 {
+					reportID = uint64(v)
+				}
 			}
 		}
 
@@ -322,6 +337,7 @@ func (s *Service) RunCycle(ctx context.Context, opts CycleOptions) (*CycleResult
 
 	s.persistCycleSession(ctx, result, input, promptBundle.Version, plan, funnel)
 	s.persistCycleMemory(ctx, result, plan, funnel)
+	s.finalizeCycleReport(ctx, reportID, result, funnel)
 	s.observeCycleMetrics(result, fallbackReason)
 	return result, nil
 }
@@ -552,7 +568,7 @@ func sortPlanSteps(steps []cyclePlanStep) []cyclePlanStep {
 	return out
 }
 
-func (s *Service) executePlanStep(ctx context.Context, step cyclePlanStep, opts CycleOptions) (cycleStepExecution, error) {
+func (s *Service) executePlanStep(ctx context.Context, step cyclePlanStep, opts CycleOptions, result *CycleResult, funnel map[string]any) (cycleStepExecution, error) {
 	tool := strings.TrimSpace(strings.ToLower(step.Tool))
 	switch tool {
 	case "market.sync.batch":
@@ -568,12 +584,7 @@ func (s *Service) executePlanStep(ctx context.Context, step cyclePlanStep, opts 
 	case "chain.scan.batch":
 		return s.runToolChainScan(ctx, step.Args), nil
 	case "report.generate":
-		return cycleStepExecution{
-			Status: "success",
-			Records: []CycleRecord{
-				{Entity: "agent_report", Result: "success", Count: 1},
-			},
-		}, nil
+		return s.runToolReportGenerate(ctx, result, funnel), nil
 	default:
 		exec := cycleStepExecution{
 			Status: "error",
@@ -649,6 +660,7 @@ func (s *Service) runToolMarketCityResolve(ctx context.Context, args map[string]
 		Meta: map[string]any{
 			"sources":      res.Sources,
 			"skip_reasons": res.SkipReasons,
+			"items":        res.Items,
 		},
 	}
 	if len(res.Errors) > 0 {
@@ -850,6 +862,59 @@ func (s *Service) runToolChainScan(ctx context.Context, args map[string]any) cyc
 	}
 }
 
+func (s *Service) runToolReportGenerate(ctx context.Context, result *CycleResult, funnel map[string]any) cycleStepExecution {
+	if s.db == nil || result == nil {
+		return unavailableToolExec("report.generate")
+	}
+	summaryJSON, _ := json.Marshal(map[string]any{
+		"session_id":  result.SessionID,
+		"cycle_id":    result.CycleID,
+		"run_mode":    result.RunMode,
+		"decision":    result.Decision,
+		"status":      result.Status,
+		"llm_calls":   result.LLMCalls,
+		"tool_calls":  result.ToolCalls,
+		"records":     result.Records,
+		"errors":      result.Errors,
+		"warnings":    result.Warnings,
+		"freshness":   result.Freshness,
+		"started_at":  result.StartedAt,
+		"finished_at": result.FinishedAt,
+		"duration_ms": result.DurationMS,
+	})
+	funnelJSON, _ := json.Marshal(funnel)
+
+	row := model.AgentReport{
+		SessionID:   result.SessionID,
+		CycleID:     result.CycleID,
+		RunMode:     result.RunMode,
+		Decision:    result.Decision,
+		Status:      "in_progress",
+		SummaryJSON: datatypes.JSON(summaryJSON),
+		FunnelJSON:  datatypes.JSON(funnelJSON),
+		CreatedAt:   time.Now().UTC(),
+		UpdatedAt:   time.Now().UTC(),
+	}
+	if err := s.db.WithContext(ctx).Create(&row).Error; err != nil {
+		return cycleStepExecution{
+			Status: "error",
+			Errors: []CycleIssue{{
+				Code:    "report_persist_failed",
+				Message: err.Error(),
+				Source:  "report.generate",
+				Count:   1,
+			}},
+		}
+	}
+	return cycleStepExecution{
+		Status: "success",
+		Records: []CycleRecord{
+			{Entity: "agent_report", Result: "success", Count: 1},
+		},
+		Meta: map[string]any{"report_id": row.ID},
+	}
+}
+
 func unavailableToolExec(tool string) cycleStepExecution {
 	return cycleStepExecution{
 		Status: "error",
@@ -861,6 +926,42 @@ func unavailableToolExec(tool string) cycleStepExecution {
 				Count:   1,
 			},
 		},
+	}
+}
+
+func (s *Service) finalizeCycleReport(ctx context.Context, reportID uint64, result *CycleResult, funnel map[string]any) {
+	if s.db == nil || reportID == 0 || result == nil {
+		return
+	}
+	summaryJSON, _ := json.Marshal(map[string]any{
+		"session_id":  result.SessionID,
+		"cycle_id":    result.CycleID,
+		"run_mode":    result.RunMode,
+		"decision":    result.Decision,
+		"status":      result.Status,
+		"skip_reason": result.SkipReason,
+		"llm_calls":   result.LLMCalls,
+		"tool_calls":  result.ToolCalls,
+		"records":     result.Records,
+		"errors":      result.Errors,
+		"warnings":    result.Warnings,
+		"freshness":   result.Freshness,
+		"started_at":  result.StartedAt,
+		"finished_at": result.FinishedAt,
+		"duration_ms": result.DurationMS,
+	})
+	funnelJSON, _ := json.Marshal(funnel)
+	if err := s.db.WithContext(ctx).
+		Model(&model.AgentReport{}).
+		Where("id = ?", reportID).
+		Updates(map[string]any{
+			"status":       result.Status,
+			"decision":     result.Decision,
+			"summary_json": datatypes.JSON(summaryJSON),
+			"funnel_json":  datatypes.JSON(funnelJSON),
+			"updated_at":   time.Now().UTC(),
+		}).Error; err != nil && s.log != nil {
+		s.log.Warn("finalize agent report failed", zap.Error(err), zap.Uint64("report_id", reportID))
 	}
 }
 

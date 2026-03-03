@@ -111,6 +111,18 @@ func setupCycleTestDB(t *testing.T) *gorm.DB {
 			execution_outcome_json TEXT,
 			created_at DATETIME
 		)`,
+		`CREATE TABLE agent_reports (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			session_id TEXT,
+			cycle_id TEXT,
+			run_mode TEXT,
+			decision TEXT,
+			status TEXT,
+			summary_json TEXT,
+			funnel_json TEXT,
+			created_at DATETIME,
+			updated_at DATETIME
+		)`,
 		`CREATE TABLE prompt_versions (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			name TEXT,
@@ -192,6 +204,13 @@ func TestRunCycleFallbackPersistsSessionAndMemory(t *testing.T) {
 	}
 	if memories != 1 {
 		t.Fatalf("expected 1 agent_memory, got=%d", memories)
+	}
+	var reports int64
+	if err := db.Model(&model.AgentReport{}).Count(&reports).Error; err != nil {
+		t.Fatalf("count agent_reports: %v", err)
+	}
+	if reports != 1 {
+		t.Fatalf("expected 1 agent_report, got=%d", reports)
 	}
 }
 

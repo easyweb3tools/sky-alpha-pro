@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"sort"
+	"strings"
 	"sync"
 
 	"golang.org/x/sync/errgroup"
@@ -24,7 +25,16 @@ type ResolveCitiesResult struct {
 	SpecReady   int            `json:"spec_ready"`
 	Sources     map[string]int `json:"sources"`
 	SkipReasons map[string]int `json:"skip_reasons"`
+	Items       []ResolvedCity `json:"items,omitempty"`
 	Errors      []string       `json:"errors,omitempty"`
+}
+
+type ResolvedCity struct {
+	MarketID   string  `json:"market_id"`
+	City       string  `json:"city"`
+	Source     string  `json:"source"`
+	Confidence float64 `json:"confidence"`
+	SkipReason string  `json:"skip_reason,omitempty"`
 }
 
 func (s *Service) ResolveMarketCities(ctx context.Context, opts ResolveCitiesOptions) (*ResolveCitiesResult, error) {
@@ -56,6 +66,7 @@ func (s *Service) ResolveMarketCities(ctx context.Context, opts ResolveCitiesOpt
 		Processed:   len(markets),
 		Sources:     map[string]int{},
 		SkipReasons: map[string]int{},
+		Items:       make([]ResolvedCity, 0, len(markets)),
 		Errors:      make([]string, 0),
 	}
 	if len(markets) == 0 {
@@ -84,12 +95,14 @@ func (s *Service) ResolveMarketCities(ctx context.Context, opts ResolveCitiesOpt
 			if source == "" && normalizeCityToken(m.City) != "" {
 				source = "market_field"
 			}
+			if source == "" {
+				source = "unknown"
+			}
+			confidence := cityResolutionConfidence(source, spec.City)
 
 			mu.Lock()
 			defer mu.Unlock()
-			if source != "" {
-				result.Sources[source]++
-			}
+			result.Sources[source]++
 			if skipReason != "" {
 				result.SkipReasons[skipReason]++
 			}
@@ -101,6 +114,13 @@ func (s *Service) ResolveMarketCities(ctx context.Context, opts ResolveCitiesOpt
 			if spec.Status == "ready" {
 				result.SpecReady++
 			}
+			result.Items = append(result.Items, ResolvedCity{
+				MarketID:   m.ID,
+				City:       spec.City,
+				Source:     source,
+				Confidence: confidence,
+				SkipReason: skipReason,
+			})
 			if specErr != nil {
 				result.Errors = append(result.Errors, specErr.Error())
 				if errors.Is(specErr, context.Canceled) || errors.Is(specErr, context.DeadlineExceeded) {
@@ -196,4 +216,22 @@ func (s *Service) lookupCitySource(ctx context.Context, m model.Market) string {
 		return ""
 	}
 	return r.Source
+}
+
+func cityResolutionConfidence(source, city string) float64 {
+	if normalizeCityToken(city) == "" {
+		return 0
+	}
+	switch strings.ToLower(strings.TrimSpace(source)) {
+	case "market_field":
+		return 1.0
+	case "rule":
+		return 0.85
+	case "vertex_ai":
+		return 0.75
+	case "vertex_rate_limited", "vertex_failed", "vertex_global_backoff", "unknown":
+		return 0
+	default:
+		return 0.5
+	}
 }
