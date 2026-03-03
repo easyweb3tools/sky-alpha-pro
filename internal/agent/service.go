@@ -16,10 +16,13 @@ import (
 	"gorm.io/datatypes"
 	"gorm.io/gorm"
 
+	"sky-alpha-pro/internal/chain"
+	"sky-alpha-pro/internal/market"
 	"sky-alpha-pro/internal/model"
 	"sky-alpha-pro/internal/signal"
 	"sky-alpha-pro/internal/weather"
 	"sky-alpha-pro/pkg/config"
+	"sky-alpha-pro/pkg/metrics"
 )
 
 const (
@@ -34,9 +37,13 @@ type Service struct {
 	cfg       config.AgentConfig
 	db        *gorm.DB
 	log       *zap.Logger
+	metrics   *metrics.Registry
+	market    *market.Service
 	weather   *weather.Service
 	signalSvc *signal.Service
+	chainSvc  *chain.Service
 	vertexAI  *vertexAIClient
+	cycleMu   sync.Mutex
 }
 
 func NewService(cfg config.AgentConfig, db *gorm.DB, log *zap.Logger, weatherSvc *weather.Service, signalSvc *signal.Service) *Service {
@@ -53,6 +60,21 @@ func NewService(cfg config.AgentConfig, db *gorm.DB, log *zap.Logger, weatherSvc
 		signalSvc: signalSvc,
 		vertexAI:  vertexAI,
 	}
+}
+
+func (s *Service) SetToolServices(marketSvc *market.Service, chainSvc *chain.Service) {
+	if s == nil {
+		return
+	}
+	s.market = marketSvc
+	s.chainSvc = chainSvc
+}
+
+func (s *Service) SetMetrics(reg *metrics.Registry) {
+	if s == nil {
+		return
+	}
+	s.metrics = reg
 }
 
 func (s *Service) Analyze(ctx context.Context, req AnalyzeRequest) (*AnalyzeResponse, error) {

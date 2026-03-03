@@ -144,6 +144,7 @@ type SchedulerJobsConfig struct {
 	WeatherForecast SchedulerWeatherJobConfig `mapstructure:"weather_forecast"`
 	ChainScan       SchedulerChainJobConfig   `mapstructure:"chain_scan"`
 	SimCycle        SchedulerJobConfig        `mapstructure:"sim_cycle"`
+	AgentCycle      SchedulerAgentJobConfig   `mapstructure:"agent_cycle"`
 }
 
 type SchedulerJobConfig struct {
@@ -170,6 +171,19 @@ type SchedulerChainJobConfig struct {
 	Immediate      bool          `mapstructure:"immediate"`
 	LookbackBlocks uint64        `mapstructure:"lookback_blocks"`
 	MaxTx          int           `mapstructure:"max_tx"`
+}
+
+type SchedulerAgentJobConfig struct {
+	Enabled             bool          `mapstructure:"enabled"`
+	Interval            time.Duration `mapstructure:"interval"`
+	Timeout             time.Duration `mapstructure:"timeout"`
+	Immediate           bool          `mapstructure:"immediate"`
+	RunMode             string        `mapstructure:"run_mode"`
+	TradeEnabled        bool          `mapstructure:"trade_enabled"`
+	MaxToolCalls        int           `mapstructure:"max_tool_calls"`
+	MaxExternalRequests int           `mapstructure:"max_external_requests"`
+	MemoryWindow        int           `mapstructure:"memory_window"`
+	MarketLimit         int           `mapstructure:"market_limit"`
 }
 
 type MetricsConfig struct {
@@ -257,9 +271,9 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("agent.max_forecast_days", 10)
 	v.SetDefault("agent.vertex_project", "")
 	v.SetDefault("agent.vertex_location", "us-central1")
-	v.SetDefault("agent.vertex_model", "gemini-2.5-flash")
+	v.SetDefault("agent.vertex_model", "gemini-2.5-pro")
 	v.SetDefault("agent.vertex_temperature", 0.2)
-	v.SetDefault("agent.vertex_max_output_tokens", 600)
+	v.SetDefault("agent.vertex_max_output_tokens", 2048)
 	v.SetDefault("agent.vertex_timeout", "15s")
 
 	v.SetDefault("trade.private_key", "")
@@ -317,6 +331,17 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("scheduler.jobs.sim_cycle.interval", "5m")
 	v.SetDefault("scheduler.jobs.sim_cycle.timeout", "120s")
 	v.SetDefault("scheduler.jobs.sim_cycle.immediate", false)
+
+	v.SetDefault("scheduler.jobs.agent_cycle.enabled", false)
+	v.SetDefault("scheduler.jobs.agent_cycle.interval", "10m")
+	v.SetDefault("scheduler.jobs.agent_cycle.timeout", "120s")
+	v.SetDefault("scheduler.jobs.agent_cycle.immediate", false)
+	v.SetDefault("scheduler.jobs.agent_cycle.run_mode", "observe")
+	v.SetDefault("scheduler.jobs.agent_cycle.trade_enabled", false)
+	v.SetDefault("scheduler.jobs.agent_cycle.max_tool_calls", 12)
+	v.SetDefault("scheduler.jobs.agent_cycle.max_external_requests", 200)
+	v.SetDefault("scheduler.jobs.agent_cycle.memory_window", 3)
+	v.SetDefault("scheduler.jobs.agent_cycle.market_limit", 300)
 
 	v.SetDefault("metrics.enabled", true)
 	v.SetDefault("metrics.path", "/metrics")

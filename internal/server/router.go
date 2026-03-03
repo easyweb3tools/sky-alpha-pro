@@ -48,6 +48,7 @@ func NewRouterWithServices(cfg *config.Config, log *zap.Logger, db *gorm.DB, met
 		api.GET("/positions", ListPositionsHandler(services.Trade))
 		api.GET("/pnl", GetPnLReportHandler(services.Trade))
 		api.POST("/agent/analyze", AnalyzeAgentHandler(services.Agent))
+		api.POST("/agent/cycle", RunAgentCycleHandler(services.Agent))
 		api.GET("/agent/signals", ListSignalsHandler(services.Signal))
 		api.GET("/agent/signals/:id", GetAgentSignalHandler(services.Signal))
 		api.POST("/chain/scan", ScanChainHandler(services.Chain))

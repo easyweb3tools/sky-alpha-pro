@@ -49,3 +49,45 @@ const (
 	DepthSummary = "summary"
 	DepthFull    = "full"
 )
+
+type CycleOptions struct {
+	CycleID             string `json:"cycle_id"`
+	RunMode             string `json:"run_mode"`
+	TradeEnabled        bool   `json:"trade_enabled"`
+	MaxToolCalls        int    `json:"max_tool_calls"`
+	MaxExternalRequests int    `json:"max_external_requests"`
+	MemoryWindow        int    `json:"memory_window"`
+	MarketLimit         int    `json:"market_limit"`
+}
+
+type CycleResult struct {
+	SessionID  string             `json:"session_id"`
+	CycleID    string             `json:"cycle_id"`
+	RunMode    string             `json:"run_mode"`
+	Decision   string             `json:"decision"`
+	Status     string             `json:"status"`
+	SkipReason string             `json:"skip_reason,omitempty"`
+	Model      string             `json:"model,omitempty"`
+	LLMCalls   int                `json:"llm_calls"`
+	ToolCalls  int                `json:"tool_calls"`
+	Records    []CycleRecord      `json:"records"`
+	Errors     []CycleIssue       `json:"errors,omitempty"`
+	Warnings   []CycleIssue       `json:"warnings,omitempty"`
+	Freshness  map[string]float64 `json:"freshness,omitempty"`
+	StartedAt  time.Time          `json:"started_at"`
+	FinishedAt time.Time          `json:"finished_at"`
+	DurationMS int64              `json:"duration_ms"`
+}
+
+type CycleRecord struct {
+	Entity string `json:"entity"`
+	Result string `json:"result"`
+	Count  int    `json:"count"`
+}
+
+type CycleIssue struct {
+	Code    string `json:"code"`
+	Message string `json:"message"`
+	Source  string `json:"source,omitempty"`
+	Count   int    `json:"count,omitempty"`
+}

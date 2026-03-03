@@ -15,9 +15,9 @@ import (
 
 const (
 	defaultVertexLocation        = "us-central1"
-	defaultVertexModel           = "gemini-2.5-flash"
+	defaultVertexModel           = "gemini-2.5-pro"
 	defaultVertexTemperature     = float32(0.2)
-	defaultVertexMaxOutputTokens = 600
+	defaultVertexMaxOutputTokens = 2048
 	defaultVertexTimeout         = 15 * time.Second
 )
 

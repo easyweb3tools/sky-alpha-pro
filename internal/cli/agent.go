@@ -21,8 +21,68 @@ func newAgentCmd() *cobra.Command {
 		Use:   "agent",
 		Short: "AI agent analysis commands",
 	}
+	cmd.AddCommand(newAgentCycleCmd())
 	cmd.AddCommand(newAgentAnalyzeCmd())
 	cmd.AddCommand(newAgentSignalsCmd())
+	return cmd
+}
+
+func newAgentCycleCmd() *cobra.Command {
+	var (
+		runMode             string
+		maxToolCalls        int
+		maxExternalRequests int
+		memoryWindow        int
+		marketLimit         int
+	)
+	cmd := &cobra.Command{
+		Use:   "cycle",
+		Short: "Run one agent cycle (plan + tools)",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if err := requireRuntime(); err != nil {
+				return err
+			}
+
+			db, err := database.Open(appConfig.Database, appLogger)
+			if err != nil {
+				return err
+			}
+			defer database.Close(db)
+
+			weatherSvc := weather.NewService(appConfig.Weather, db, appLogger)
+			signalSvc := signal.NewService(appConfig.Signal, db, appLogger)
+			agentSvc := agent.NewService(appConfig.Agent, db, appLogger, weatherSvc, signalSvc)
+
+			result, err := agentSvc.RunCycle(context.Background(), agent.CycleOptions{
+				RunMode:             runMode,
+				TradeEnabled:        false,
+				MaxToolCalls:        maxToolCalls,
+				MaxExternalRequests: maxExternalRequests,
+				MemoryWindow:        memoryWindow,
+				MarketLimit:         marketLimit,
+			})
+			if err != nil {
+				return err
+			}
+			if jsonOut {
+				enc := json.NewEncoder(cmd.OutOrStdout())
+				enc.SetIndent("", "  ")
+				return enc.Encode(result)
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "session:   %s\n", result.SessionID)
+			fmt.Fprintf(cmd.OutOrStdout(), "cycle:     %s\n", result.CycleID)
+			fmt.Fprintf(cmd.OutOrStdout(), "status:    %s\n", result.Status)
+			fmt.Fprintf(cmd.OutOrStdout(), "decision:  %s\n", result.Decision)
+			fmt.Fprintf(cmd.OutOrStdout(), "llm_calls: %d\n", result.LLMCalls)
+			fmt.Fprintf(cmd.OutOrStdout(), "tools:     %d\n", result.ToolCalls)
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&runMode, "run-mode", "observe", "run mode: observe|simulate|trade")
+	cmd.Flags().IntVar(&maxToolCalls, "max-tool-calls", 0, "max tool calls per cycle")
+	cmd.Flags().IntVar(&maxExternalRequests, "max-external-requests", 0, "max external requests per cycle")
+	cmd.Flags().IntVar(&memoryWindow, "memory-window", 0, "recent memory windows for context")
+	cmd.Flags().IntVar(&marketLimit, "market-limit", 0, "max markets for batch tools")
 	return cmd
 }
 

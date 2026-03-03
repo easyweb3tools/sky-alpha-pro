@@ -21,6 +21,16 @@ type analyzeAgentRequest struct {
 	Depth    string `json:"depth"`
 }
 
+type runAgentCycleRequest struct {
+	CycleID             string `json:"cycle_id"`
+	RunMode             string `json:"run_mode"`
+	TradeEnabled        bool   `json:"trade_enabled"`
+	MaxToolCalls        int    `json:"max_tool_calls"`
+	MaxExternalRequests int    `json:"max_external_requests"`
+	MemoryWindow        int    `json:"memory_window"`
+	MarketLimit         int    `json:"market_limit"`
+}
+
 func AnalyzeAgentHandler(svc *agent.Service) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		if !agentAnalyzeMu.TryLock() {
@@ -115,5 +125,42 @@ func GetAgentSignalHandler(svc *signal.Service) gin.HandlerFunc {
 			return
 		}
 		c.JSON(http.StatusOK, item)
+	}
+}
+
+func RunAgentCycleHandler(svc *agent.Service) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		var body runAgentCycleRequest
+		if c.Request.ContentLength > 0 {
+			if err := c.ShouldBindJSON(&body); err != nil {
+				c.JSON(http.StatusBadRequest, gin.H{
+					"error": gin.H{"code": "BAD_REQUEST", "message": "invalid json body"},
+				})
+				return
+			}
+		}
+		if q := strings.TrimSpace(c.Query("run_mode")); q != "" {
+			body.RunMode = q
+		}
+		if q := strings.TrimSpace(c.Query("cycle_id")); q != "" {
+			body.CycleID = q
+		}
+
+		resp, err := svc.RunCycle(c.Request.Context(), agent.CycleOptions{
+			CycleID:             body.CycleID,
+			RunMode:             body.RunMode,
+			TradeEnabled:        body.TradeEnabled,
+			MaxToolCalls:        body.MaxToolCalls,
+			MaxExternalRequests: body.MaxExternalRequests,
+			MemoryWindow:        body.MemoryWindow,
+			MarketLimit:         body.MarketLimit,
+		})
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{
+				"error": gin.H{"code": "AGENT_CYCLE_FAILED", "message": err.Error()},
+			})
+			return
+		}
+		c.JSON(http.StatusOK, resp)
 	}
 }
