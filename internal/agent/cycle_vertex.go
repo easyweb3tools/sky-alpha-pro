@@ -82,3 +82,92 @@ func (v *vertexAIClient) PlanCycle(ctx context.Context, input cyclePromptInput, 
 func buildCyclePlanPrompt(inputJSON string) string {
 	return "Runtime context JSON:\n" + inputJSON + "\n\nOutput strict JSON only."
 }
+
+type cycleValidationInput struct {
+	SessionID string         `json:"session_id"`
+	CycleID   string         `json:"cycle_id"`
+	RunMode   string         `json:"run_mode"`
+	Decision  string         `json:"decision"`
+	Status    string         `json:"status"`
+	Records   []CycleRecord  `json:"records"`
+	Errors    []CycleIssue   `json:"errors,omitempty"`
+	Warnings  []CycleIssue   `json:"warnings,omitempty"`
+	Funnel    map[string]any `json:"funnel,omitempty"`
+}
+
+type cycleValidationOutput struct {
+	Verdict   string   `json:"verdict"`
+	Score     float64  `json:"score"`
+	Summary   string   `json:"summary"`
+	Strengths []string `json:"strengths"`
+	Risks     []string `json:"risks"`
+	Actions   []string `json:"actions"`
+}
+
+const cycleValidationSystemPrompt = `You are Sky Alpha Pro's cycle validator.
+Assess one completed cycle and return strict JSON only:
+verdict, score, summary, strengths, risks, actions.
+Rules:
+1) Use only provided facts.
+2) score range 0-100.
+3) verdict must be pass|warning|fail.
+4) Keep concise and actionable.`
+
+func (v *vertexAIClient) ValidateCycle(ctx context.Context, input cycleValidationInput) (*cycleValidationOutput, error) {
+	if v == nil || v.client == nil {
+		return nil, fmt.Errorf("vertex ai client is not configured")
+	}
+	callCtx := ctx
+	cancel := func() {}
+	if v.timeout > 0 {
+		callCtx, cancel = context.WithTimeout(ctx, v.timeout)
+	}
+	defer cancel()
+
+	body, err := json.Marshal(input)
+	if err != nil {
+		return nil, err
+	}
+
+	resp, err := v.client.Models.GenerateContent(
+		callCtx,
+		v.model,
+		genai.Text("Cycle result JSON:\n"+string(body)+"\n\nReturn strict JSON only."),
+		&genai.GenerateContentConfig{
+			SystemInstruction: genai.NewContentFromText(cycleValidationSystemPrompt, genai.RoleUser),
+			Temperature:       genai.Ptr(float32(0.1)),
+			MaxOutputTokens:   int32(minInt(v.maxOutputTokens, 1024)),
+			ResponseMIMEType:  "application/json",
+		},
+	)
+	if err != nil {
+		return nil, err
+	}
+	text := strings.TrimSpace(resp.Text())
+	if text == "" {
+		return nil, fmt.Errorf("vertex ai returned empty validation")
+	}
+	var out cycleValidationOutput
+	if err := json.Unmarshal([]byte(text), &out); err != nil {
+		return nil, fmt.Errorf("decode cycle validation json: %w", err)
+	}
+	out.Verdict = strings.ToLower(strings.TrimSpace(out.Verdict))
+	if out.Verdict == "" {
+		out.Verdict = "warning"
+	}
+	if out.Score < 0 {
+		out.Score = 0
+	}
+	if out.Score > 100 {
+		out.Score = 100
+	}
+	out.Summary = strings.TrimSpace(out.Summary)
+	return &out, nil
+}
+
+func minInt(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}

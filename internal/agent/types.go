@@ -91,3 +91,30 @@ type CycleIssue struct {
 	Source  string `json:"source,omitempty"`
 	Count   int    `json:"count,omitempty"`
 }
+
+type ListValidationsOptions struct {
+	Limit int `json:"limit"`
+}
+
+type ValidationView struct {
+	ID             uint64    `json:"id"`
+	SessionID      string    `json:"session_id"`
+	CycleID        string    `json:"cycle_id"`
+	ValidatorModel string    `json:"validator_model"`
+	Verdict        string    `json:"verdict"`
+	Score          float64   `json:"score"`
+	Summary        string    `json:"summary"`
+	CreatedAt      time.Time `json:"created_at"`
+}
+
+type ValidationSummary struct {
+	WindowHours int            `json:"window_hours"`
+	Total       int64          `json:"total"`
+	ByVerdict   map[string]int `json:"by_verdict"`
+}
+
+type ListValidationsResponse struct {
+	Items   []ValidationView  `json:"items"`
+	Count   int               `json:"count"`
+	Summary ValidationSummary `json:"summary"`
+}

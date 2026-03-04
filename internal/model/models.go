@@ -324,6 +324,22 @@ type AgentReport struct {
 	UpdatedAt   time.Time      `gorm:"column:updated_at"`
 }
 
+type AgentValidation struct {
+	ID              uint64         `gorm:"column:id;primaryKey;autoIncrement"`
+	SessionID       string         `gorm:"column:session_id;type:uuid;not null;index:idx_agent_validations_session,priority:1"`
+	CycleID         string         `gorm:"column:cycle_id;size:64;index:idx_agent_validations_cycle"`
+	ValidatorModel  string         `gorm:"column:validator_model;size:80"`
+	Verdict         string         `gorm:"column:verdict;size:20;not null;index:idx_agent_validations_verdict"`
+	Score           float64        `gorm:"column:score;type:decimal(5,2)"`
+	Summary         string         `gorm:"column:summary;type:text"`
+	StrengthsJSON   datatypes.JSON `gorm:"column:strengths_json;type:jsonb"`
+	RisksJSON       datatypes.JSON `gorm:"column:risks_json;type:jsonb"`
+	ActionsJSON     datatypes.JSON `gorm:"column:actions_json;type:jsonb"`
+	InputJSON       datatypes.JSON `gorm:"column:input_json;type:jsonb"`
+	OutputJSON      datatypes.JSON `gorm:"column:output_json;type:jsonb"`
+	CreatedAt       time.Time      `gorm:"column:created_at;not null;index:idx_agent_validations_session,sort:desc,priority:2"`
+}
+
 type SchedulerRun struct {
 	ID             uint64         `gorm:"column:id;primaryKey;autoIncrement"`
 	JobName        string         `gorm:"column:job_name;size:80;not null;index:idx_scheduler_runs_job_time,priority:1"`

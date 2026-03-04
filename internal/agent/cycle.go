@@ -203,6 +203,13 @@ func (s *Service) RunCycle(ctx context.Context, opts CycleOptions) (*CycleResult
 	}
 
 	plan, modelName, fallbackReason := s.buildPlan(ctx, input, promptBundle.System, result)
+	plan = appendMandatoryStep(plan, cyclePlanStep{
+		Tool:            "report.validate.write",
+		Why:             "validate cycle value and write structured verdict",
+		Args:            map[string]any{},
+		SuccessCriteria: "validation persisted",
+		OnFail:          "continue",
+	})
 	if planErr := validatePlan(plan); planErr != nil {
 		result.Warnings = append(result.Warnings, CycleIssue{
 			Code:    issueCodePlanValidationFailed,
@@ -453,7 +460,7 @@ func (s *Service) buildPlan(ctx context.Context, input cyclePromptInput, systemP
 }
 
 func (s *Service) buildFallbackPlan(input cyclePromptInput) cyclePlanOutput {
-	steps := make([]cyclePlanStep, 0, 6)
+	steps := make([]cyclePlanStep, 0, 7)
 	stepNo := 1
 
 	if s.market != nil && input.Coverage.ActiveMarkets == 0 {
@@ -519,6 +526,15 @@ func (s *Service) buildFallbackPlan(input cyclePromptInput) cyclePlanOutput {
 		SuccessCriteria: "cycle summary persisted",
 		OnFail:          "continue",
 	})
+	stepNo++
+	steps = append(steps, cyclePlanStep{
+		Step:            stepNo,
+		Tool:            "report.validate.write",
+		Why:             "validate cycle value and write structured verdict",
+		Args:            map[string]any{},
+		SuccessCriteria: "validation persisted",
+		OnFail:          "continue",
+	})
 
 	decision := "run"
 	if len(steps) == 1 && steps[0].Tool == "report.generate" {
@@ -568,6 +584,33 @@ func sortPlanSteps(steps []cyclePlanStep) []cyclePlanStep {
 	return out
 }
 
+func appendMandatoryStep(plan cyclePlanOutput, step cyclePlanStep) cyclePlanOutput {
+	tool := strings.ToLower(strings.TrimSpace(step.Tool))
+	if tool == "" {
+		return plan
+	}
+	for _, it := range plan.Plan {
+		if strings.ToLower(strings.TrimSpace(it.Tool)) == tool {
+			return plan
+		}
+	}
+	next := 1
+	for _, it := range plan.Plan {
+		if it.Step >= next {
+			next = it.Step + 1
+		}
+	}
+	step.Step = next
+	if strings.TrimSpace(step.OnFail) == "" {
+		step.OnFail = "continue"
+	}
+	if step.Args == nil {
+		step.Args = map[string]any{}
+	}
+	plan.Plan = append(plan.Plan, step)
+	return plan
+}
+
 func (s *Service) executePlanStep(ctx context.Context, step cyclePlanStep, opts CycleOptions, result *CycleResult, funnel map[string]any) (cycleStepExecution, error) {
 	tool := strings.TrimSpace(strings.ToLower(step.Tool))
 	switch tool {
@@ -585,6 +628,8 @@ func (s *Service) executePlanStep(ctx context.Context, step cyclePlanStep, opts 
 		return s.runToolChainScan(ctx, step.Args), nil
 	case "report.generate":
 		return s.runToolReportGenerate(ctx, result, funnel), nil
+	case "report.validate.write":
+		return s.runToolReportValidateWrite(ctx, result, funnel), nil
 	default:
 		exec := cycleStepExecution{
 			Status: "error",
@@ -963,6 +1008,105 @@ func (s *Service) finalizeCycleReport(ctx context.Context, reportID uint64, resu
 		}).Error; err != nil && s.log != nil {
 		s.log.Warn("finalize agent report failed", zap.Error(err), zap.Uint64("report_id", reportID))
 	}
+}
+
+func (s *Service) runToolReportValidateWrite(ctx context.Context, result *CycleResult, funnel map[string]any) cycleStepExecution {
+	if s.db == nil || result == nil {
+		return unavailableToolExec("report.validate.write")
+	}
+	if s.vertexAI == nil {
+		return cycleStepExecution{
+			Status: "skipped",
+			Records: []CycleRecord{
+				{Entity: "agent_validation", Result: "skipped", Count: 1},
+			},
+			Warnings: []CycleIssue{{
+				Code:    "validator_unavailable",
+				Message: "vertex validator unavailable",
+				Source:  "report.validate.write",
+				Count:   1,
+			}},
+		}
+	}
+
+	input := cycleValidationInput{
+		SessionID: result.SessionID,
+		CycleID:   result.CycleID,
+		RunMode:   result.RunMode,
+		Decision:  result.Decision,
+		Status:    result.Status,
+		Records:   result.Records,
+		Errors:    result.Errors,
+		Warnings:  result.Warnings,
+		Funnel:    funnel,
+	}
+	output, err := s.vertexAI.ValidateCycle(ctx, input)
+	if err != nil {
+		return cycleStepExecution{
+			Status: "error",
+			Errors: []CycleIssue{{
+				Code:    "validation_failed",
+				Message: err.Error(),
+				Source:  "report.validate.write",
+				Count:   1,
+			}},
+		}
+	}
+
+	rowID, persistErr := s.persistValidationReport(ctx, result, input, output)
+	if persistErr != nil {
+		return cycleStepExecution{
+			Status: "error",
+			Errors: []CycleIssue{{
+				Code:    "validation_persist_failed",
+				Message: persistErr.Error(),
+				Source:  "report.validate.write",
+				Count:   1,
+			}},
+		}
+	}
+
+	return cycleStepExecution{
+		Status: "success",
+		Records: []CycleRecord{
+			{Entity: "agent_validation", Result: "success", Count: 1},
+		},
+		Meta: map[string]any{
+			"validation_id": rowID,
+			"verdict":       output.Verdict,
+			"score":         output.Score,
+		},
+	}
+}
+
+func (s *Service) persistValidationReport(ctx context.Context, result *CycleResult, input cycleValidationInput, output *cycleValidationOutput) (uint64, error) {
+	if s.db == nil || result == nil || output == nil {
+		return 0, fmt.Errorf("invalid validation input")
+	}
+	inJSON, _ := json.Marshal(input)
+	outJSON, _ := json.Marshal(output)
+	strengthsJSON, _ := json.Marshal(output.Strengths)
+	risksJSON, _ := json.Marshal(output.Risks)
+	actionsJSON, _ := json.Marshal(output.Actions)
+
+	row := model.AgentValidation{
+		SessionID:      result.SessionID,
+		CycleID:        result.CycleID,
+		ValidatorModel: strings.TrimSpace(s.vertexAI.ModelName()),
+		Verdict:        output.Verdict,
+		Score:          output.Score,
+		Summary:        output.Summary,
+		StrengthsJSON:  datatypes.JSON(strengthsJSON),
+		RisksJSON:      datatypes.JSON(risksJSON),
+		ActionsJSON:    datatypes.JSON(actionsJSON),
+		InputJSON:      datatypes.JSON(inJSON),
+		OutputJSON:     datatypes.JSON(outJSON),
+		CreatedAt:      time.Now().UTC(),
+	}
+	if err := s.db.WithContext(ctx).Create(&row).Error; err != nil {
+		return 0, err
+	}
+	return row.ID, nil
 }
 
 func (s *Service) persistCycleSession(ctx context.Context, result *CycleResult, input cyclePromptInput, promptVersion string, plan cyclePlanOutput, funnel map[string]any) {

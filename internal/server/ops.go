@@ -8,6 +8,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 
+	"sky-alpha-pro/internal/agent"
 	"sky-alpha-pro/internal/scheduler"
 	"sky-alpha-pro/pkg/config"
 	"sky-alpha-pro/pkg/metrics"
@@ -48,17 +49,10 @@ type opsBlocker struct {
 }
 
 func OpsStatusHandler(cfg *config.Config, metricReg *metrics.Registry, schedulerMgr *scheduler.Manager) gin.HandlerFunc {
-	requiredToken := strings.TrimSpace(os.Getenv("SKY_ALPHA_OPS_TOKEN"))
+	requireAuth := buildOpsAuthGuard()
 	return func(c *gin.Context) {
-		if requiredToken != "" {
-			auth := strings.TrimSpace(c.GetHeader("Authorization"))
-			want := "Bearer " + requiredToken
-			if auth != want {
-				c.JSON(http.StatusUnauthorized, gin.H{
-					"error": gin.H{"code": "OPS_UNAUTHORIZED", "message": "missing or invalid ops token"},
-				})
-				return
-			}
+		if !requireAuth(c) {
+			return
 		}
 
 		resp := opsStatusResponse{
@@ -117,6 +111,62 @@ func OpsStatusHandler(cfg *config.Config, metricReg *metrics.Registry, scheduler
 			resp.Summary.TotalJobs = total
 		}
 		c.JSON(200, resp)
+	}
+}
+
+func OpsAgentValidationsHandler(agentSvc *agent.Service) gin.HandlerFunc {
+	requireAuth := buildOpsAuthGuard()
+	return func(c *gin.Context) {
+		if !requireAuth(c) {
+			return
+		}
+		limit, err := parsePositiveIntQuery(c, "limit", 20)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{
+				"error": gin.H{"code": "OPS_BAD_REQUEST", "message": err.Error()},
+			})
+			return
+		}
+		if limit > 200 {
+			limit = 200
+		}
+		if agentSvc == nil {
+			c.JSON(http.StatusOK, gin.H{
+				"items": []any{},
+				"count": 0,
+				"summary": gin.H{
+					"window_hours": 24,
+					"total":        0,
+					"by_verdict":   map[string]int{},
+				},
+			})
+			return
+		}
+		resp, err := agentSvc.ListValidations(c.Request.Context(), agent.ListValidationsOptions{Limit: limit})
+		if err != nil {
+			c.JSON(http.StatusServiceUnavailable, gin.H{
+				"error": gin.H{"code": "OPS_AGENT_VALIDATIONS_FAILED", "message": err.Error()},
+			})
+			return
+		}
+		c.JSON(http.StatusOK, resp)
+	}
+}
+
+func buildOpsAuthGuard() func(c *gin.Context) bool {
+	requiredToken := strings.TrimSpace(os.Getenv("SKY_ALPHA_OPS_TOKEN"))
+	return func(c *gin.Context) bool {
+		if requiredToken == "" {
+			return true
+		}
+		auth := strings.TrimSpace(c.GetHeader("Authorization"))
+		if auth == "Bearer "+requiredToken {
+			return true
+		}
+		c.JSON(http.StatusUnauthorized, gin.H{
+			"error": gin.H{"code": "OPS_UNAUTHORIZED", "message": "missing or invalid ops token"},
+		})
+		return false
 	}
 }
 

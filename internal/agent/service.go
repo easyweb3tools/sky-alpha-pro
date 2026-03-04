@@ -77,6 +77,79 @@ func (s *Service) SetMetrics(reg *metrics.Registry) {
 	s.metrics = reg
 }
 
+func (s *Service) ListValidations(ctx context.Context, opts ListValidationsOptions) (*ListValidationsResponse, error) {
+	if s == nil || s.db == nil {
+		return &ListValidationsResponse{
+			Items: []ValidationView{},
+			Summary: ValidationSummary{
+				WindowHours: 24,
+				ByVerdict:   map[string]int{},
+			},
+		}, nil
+	}
+	limit := opts.Limit
+	if limit <= 0 {
+		limit = 20
+	}
+	if limit > 200 {
+		limit = 200
+	}
+
+	var rows []model.AgentValidation
+	if err := s.db.WithContext(ctx).
+		Order("id DESC").
+		Limit(limit).
+		Find(&rows).Error; err != nil {
+		return nil, err
+	}
+
+	resp := &ListValidationsResponse{
+		Items: make([]ValidationView, 0, len(rows)),
+		Summary: ValidationSummary{
+			WindowHours: 24,
+			ByVerdict:   map[string]int{},
+		},
+	}
+	for _, row := range rows {
+		resp.Items = append(resp.Items, ValidationView{
+			ID:             row.ID,
+			SessionID:      row.SessionID,
+			CycleID:        row.CycleID,
+			ValidatorModel: row.ValidatorModel,
+			Verdict:        row.Verdict,
+			Score:          row.Score,
+			Summary:        row.Summary,
+			CreatedAt:      row.CreatedAt,
+		})
+	}
+	resp.Count = len(resp.Items)
+
+	type verdictAgg struct {
+		Verdict string
+		Cnt     int64
+	}
+	var agg []verdictAgg
+	if err := s.db.WithContext(ctx).
+		Table("agent_validations").
+		Select("verdict, COUNT(*) AS cnt").
+		Where("created_at >= ?", time.Now().UTC().Add(-24*time.Hour)).
+		Group("verdict").
+		Scan(&agg).Error; err != nil {
+		return nil, err
+	}
+	var total int64
+	for _, item := range agg {
+		key := strings.TrimSpace(item.Verdict)
+		if key == "" {
+			key = "unknown"
+		}
+		resp.Summary.ByVerdict[key] = int(item.Cnt)
+		total += item.Cnt
+	}
+	resp.Summary.Total = total
+	return resp, nil
+}
+
 func (s *Service) Analyze(ctx context.Context, req AnalyzeRequest) (*AnalyzeResponse, error) {
 	depth, err := ValidateDepth(req.Depth)
 	if err != nil {

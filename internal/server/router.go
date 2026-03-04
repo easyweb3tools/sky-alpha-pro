@@ -24,6 +24,7 @@ func NewRouterWithServices(cfg *config.Config, log *zap.Logger, db *gorm.DB, met
 
 	router.GET("/health", HealthHandler(cfg, db))
 	router.GET("/ops/status", OpsStatusHandler(cfg, metricReg, schedulerMgr))
+	router.GET("/ops/agent/validations", OpsAgentValidationsHandler(services.Agent))
 	if metricReg != nil && metricReg.Enabled() {
 		router.GET(metricReg.Path(), gin.WrapH(metricReg.Handler()))
 	}
@@ -35,6 +36,7 @@ func NewRouterWithServices(cfg *config.Config, log *zap.Logger, db *gorm.DB, met
 	{
 		api.GET("/health", HealthHandler(cfg, db))
 		api.GET("/ops/status", OpsStatusHandler(cfg, metricReg, schedulerMgr))
+		api.GET("/ops/agent/validations", OpsAgentValidationsHandler(services.Agent))
 		api.GET("/markets", ListMarketsHandler(services.Market))
 		api.POST("/markets/sync", SyncMarketsHandler(services.Market))
 		api.GET("/weather/forecast", GetForecastHandler(services.Weather))
