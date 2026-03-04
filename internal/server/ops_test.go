@@ -9,7 +9,12 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"go.uber.org/zap"
+	"gorm.io/driver/sqlite"
+	"gorm.io/gorm"
+	"gorm.io/gorm/logger"
 
+	"sky-alpha-pro/internal/agent"
+	"sky-alpha-pro/internal/model"
 	"sky-alpha-pro/internal/scheduler"
 	"sky-alpha-pro/pkg/config"
 	"sky-alpha-pro/pkg/metrics"
@@ -150,5 +155,105 @@ func TestSummarizeSchedulerSnapshot(t *testing.T) {
 	}
 	if summary.Blockers[0].Severity == "" || summary.Blockers[1].Severity == "" {
 		t.Fatalf("expected blockers with severity, got %+v", summary.Blockers)
+	}
+}
+
+func TestOpsAgentValidationsHandler(t *testing.T) {
+	gin.SetMode(gin.ReleaseMode)
+
+	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{
+		Logger: logger.Default.LogMode(logger.Silent),
+	})
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	if err := db.AutoMigrate(&model.AgentValidation{}); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+
+	now := time.Now().UTC()
+	rows := []model.AgentValidation{
+		{
+			SessionID:      "00000000-0000-0000-0000-000000000001",
+			CycleID:        "cycle-1",
+			ValidatorModel: "gemini-2.5-pro",
+			Verdict:        "pass",
+			Score:          91,
+			Summary:        "cycle is healthy",
+			CreatedAt:      now,
+		},
+		{
+			SessionID:      "00000000-0000-0000-0000-000000000002",
+			CycleID:        "cycle-2",
+			ValidatorModel: "gemini-2.5-pro",
+			Verdict:        "warning",
+			Score:          68,
+			Summary:        "partial data",
+			CreatedAt:      now.Add(-time.Hour),
+		},
+	}
+	if err := db.Create(&rows).Error; err != nil {
+		t.Fatalf("seed validations: %v", err)
+	}
+
+	svc := agent.NewService(config.AgentConfig{}, db, zap.NewNop(), nil, nil)
+	r := gin.New()
+	r.GET("/ops/agent/validations", OpsAgentValidationsHandler(svc))
+
+	req := httptest.NewRequest(http.MethodGet, "/ops/agent/validations?limit=1", nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("unexpected status: %d", w.Code)
+	}
+
+	var body struct {
+		Items []struct {
+			CycleID string `json:"cycle_id"`
+			Verdict string `json:"verdict"`
+		} `json:"items"`
+		Count   int `json:"count"`
+		Summary struct {
+			Total     int            `json:"total"`
+			ByVerdict map[string]int `json:"by_verdict"`
+		} `json:"summary"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode body: %v", err)
+	}
+	if body.Count != 1 || len(body.Items) != 1 {
+		t.Fatalf("expected one item, got count=%d len=%d", body.Count, len(body.Items))
+	}
+	if body.Items[0].CycleID != "cycle-2" && body.Items[0].CycleID != "cycle-1" {
+		t.Fatalf("unexpected cycle id: %s", body.Items[0].CycleID)
+	}
+	if body.Summary.Total != 2 {
+		t.Fatalf("expected summary total 2, got %d", body.Summary.Total)
+	}
+	if body.Summary.ByVerdict["pass"] != 1 || body.Summary.ByVerdict["warning"] != 1 {
+		t.Fatalf("unexpected verdict stats: %+v", body.Summary.ByVerdict)
+	}
+}
+
+func TestOpsAgentValidationsHandlerAuth(t *testing.T) {
+	gin.SetMode(gin.ReleaseMode)
+	t.Setenv("SKY_ALPHA_OPS_TOKEN", "ops-token")
+
+	r := gin.New()
+	r.GET("/ops/agent/validations", OpsAgentValidationsHandler(nil))
+
+	req := httptest.NewRequest(http.MethodGet, "/ops/agent/validations", nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401 without token, got %d", w.Code)
+	}
+
+	req2 := httptest.NewRequest(http.MethodGet, "/ops/agent/validations", nil)
+	req2.Header.Set("Authorization", "Bearer ops-token")
+	w2 := httptest.NewRecorder()
+	r.ServeHTTP(w2, req2)
+	if w2.Code != http.StatusOK {
+		t.Fatalf("expected 200 with valid token, got %d", w2.Code)
 	}
 }
