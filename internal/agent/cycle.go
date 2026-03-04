@@ -682,6 +682,7 @@ func (s *Service) runToolMarketCityResolve(ctx context.Context, args map[string]
 	if s.signalSvc == nil {
 		return unavailableToolExec("market.city.resolve.batch")
 	}
+	ctx = signal.WithCityResolverVertexDisabled(ctx)
 	onlyMissing := getBoolArg(args, "only_missing", true)
 	limit := getIntArg(args, "limit", defaultCycleMarketLimit)
 	res, err := s.signalSvc.ResolveMarketCities(ctx, signal.ResolveCitiesOptions{
@@ -835,6 +836,7 @@ func (s *Service) runToolSignalGenerate(ctx context.Context, args map[string]any
 	if s.signalSvc == nil {
 		return unavailableToolExec("signal.generate.batch")
 	}
+	ctx = signal.WithCityResolverVertexDisabled(ctx)
 	limit := getIntArg(args, "limit", opts.MarketLimit)
 	res, err := s.signalSvc.GenerateSignals(ctx, signal.GenerateOptions{Limit: limit})
 	if err != nil {
@@ -1014,21 +1016,6 @@ func (s *Service) runToolReportValidateWrite(ctx context.Context, result *CycleR
 	if s.db == nil || result == nil {
 		return unavailableToolExec("report.validate.write")
 	}
-	if s.vertexAI == nil {
-		return cycleStepExecution{
-			Status: "skipped",
-			Records: []CycleRecord{
-				{Entity: "agent_validation", Result: "skipped", Count: 1},
-			},
-			Warnings: []CycleIssue{{
-				Code:    "validator_unavailable",
-				Message: "vertex validator unavailable",
-				Source:  "report.validate.write",
-				Count:   1,
-			}},
-		}
-	}
-
 	input := cycleValidationInput{
 		SessionID: result.SessionID,
 		CycleID:   result.CycleID,
@@ -1040,48 +1027,7 @@ func (s *Service) runToolReportValidateWrite(ctx context.Context, result *CycleR
 		Warnings:  result.Warnings,
 		Funnel:    funnel,
 	}
-	output, err := s.vertexAI.ValidateCycle(ctx, input)
-	if err != nil {
-		fallback := &cycleValidationOutput{
-			Verdict:   "warning",
-			Score:     0,
-			Summary:   "validation fallback: " + err.Error(),
-			Strengths: []string{},
-			Risks:     []string{"vertex validation unavailable"},
-			Actions:   []string{"inspect agent_cycle logs and vertex response payload"},
-		}
-		rowID, persistErr := s.persistValidationReport(ctx, result, input, fallback)
-		if persistErr != nil {
-			return cycleStepExecution{
-				Status: "error",
-				Errors: []CycleIssue{{
-					Code:    "validation_persist_failed",
-					Message: persistErr.Error(),
-					Source:  "report.validate.write",
-					Count:   1,
-				}},
-			}
-		}
-		return cycleStepExecution{
-			Status: "degraded",
-			Records: []CycleRecord{
-				{Entity: "agent_validation", Result: "success", Count: 1},
-			},
-			Warnings: []CycleIssue{{
-				Code:    "validation_failed",
-				Message: err.Error(),
-				Source:  "report.validate.write",
-				Count:   1,
-			}},
-			Meta: map[string]any{
-				"validation_id": rowID,
-				"verdict":       fallback.Verdict,
-				"score":         fallback.Score,
-				"fallback":      true,
-			},
-		}
-	}
-
+	output := buildLocalCycleValidation(result, funnel)
 	rowID, persistErr := s.persistValidationReport(ctx, result, input, output)
 	if persistErr != nil {
 		return cycleStepExecution{
@@ -1104,6 +1050,7 @@ func (s *Service) runToolReportValidateWrite(ctx context.Context, result *CycleR
 			"validation_id": rowID,
 			"verdict":       output.Verdict,
 			"score":         output.Score,
+			"mode":          "local_self_check",
 		},
 	}
 }
@@ -1121,7 +1068,7 @@ func (s *Service) persistValidationReport(ctx context.Context, result *CycleResu
 	row := model.AgentValidation{
 		SessionID:      result.SessionID,
 		CycleID:        result.CycleID,
-		ValidatorModel: strings.TrimSpace(s.vertexAI.ModelName()),
+		ValidatorModel: "local-self-check-v1",
 		Verdict:        output.Verdict,
 		Score:          output.Score,
 		Summary:        output.Summary,
@@ -1136,6 +1083,98 @@ func (s *Service) persistValidationReport(ctx context.Context, result *CycleResu
 		return 0, err
 	}
 	return row.ID, nil
+}
+
+func buildLocalCycleValidation(result *CycleResult, funnel map[string]any) *cycleValidationOutput {
+	if result == nil {
+		return &cycleValidationOutput{
+			Verdict: "warning",
+			Score:   0,
+			Summary: "cycle result is empty",
+			Risks:   []string{"missing cycle result"},
+			Actions: []string{"inspect agent_cycle execution flow"},
+		}
+	}
+
+	verdict := "pass"
+	score := 90.0
+	strengths := []string{}
+	risks := []string{}
+	actions := []string{}
+
+	if result.Status == cycleStatusError {
+		verdict = "fail"
+		score = 20
+		risks = append(risks, "cycle ended with error status")
+		actions = append(actions, "inspect agent_cycle errors and failing step")
+	} else if result.Status == cycleStatusDegraded || len(result.Errors) > 0 {
+		verdict = "warning"
+		score = 60
+		risks = append(risks, "cycle completed with degraded status or errors")
+		actions = append(actions, "review warnings/errors and reduce tool failures")
+	}
+
+	if result.LLMCalls > 1 {
+		verdict = "warning"
+		if score > 70 {
+			score = 70
+		}
+		risks = append(risks, "llm calls exceed single-call target")
+		actions = append(actions, "ensure cycle uses one vertex call for planning")
+	} else if result.LLMCalls == 1 {
+		strengths = append(strengths, "llm call budget met (1 per cycle)")
+	}
+
+	if generated := extractFunnelInt(funnel, "signals_generated"); generated > 0 {
+		strengths = append(strengths, fmt.Sprintf("signals generated: %d", generated))
+	} else {
+		risks = append(risks, "no signals generated in this cycle")
+		actions = append(actions, "improve market spec/forecast coverage for signal pipeline")
+		if verdict == "pass" {
+			verdict = "warning"
+			score = min(score, 75.0)
+		}
+	}
+
+	if len(strengths) == 0 {
+		strengths = append(strengths, "cycle executed and persisted records")
+	}
+	if len(actions) == 0 {
+		actions = append(actions, "continue monitoring /ops/status and /ops/agent/validations")
+	}
+	summary := fmt.Sprintf("local self-check verdict=%s score=%.0f llm_calls=%d tool_calls=%d", verdict, score, result.LLMCalls, result.ToolCalls)
+	return &cycleValidationOutput{
+		Verdict:   verdict,
+		Score:     score,
+		Summary:   summary,
+		Strengths: uniqueTopN(strengths, 5),
+		Risks:     uniqueTopN(risks, 5),
+		Actions:   uniqueTopN(actions, 5),
+	}
+}
+
+func extractFunnelInt(funnel map[string]any, key string) int {
+	if len(funnel) == 0 || strings.TrimSpace(key) == "" {
+		return 0
+	}
+	v, ok := funnel[key]
+	if !ok {
+		return 0
+	}
+	switch n := v.(type) {
+	case int:
+		return n
+	case int32:
+		return int(n)
+	case int64:
+		return int(n)
+	case float32:
+		return int(n)
+	case float64:
+		return int(n)
+	default:
+		return 0
+	}
 }
 
 func (s *Service) persistCycleSession(ctx context.Context, result *CycleResult, input cyclePromptInput, promptVersion string, plan cyclePlanOutput, funnel map[string]any) {

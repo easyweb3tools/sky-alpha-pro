@@ -48,6 +48,25 @@ type cityVertexClient struct {
 
 const signalCityResolverUseVertexEnv = "SKY_ALPHA_SIGNAL_CITY_RESOLVER_USE_VERTEX"
 
+type cityResolverCtxKey string
+
+const cityResolverDisableVertexKey cityResolverCtxKey = "disable_vertex_city_resolver"
+
+func WithCityResolverVertexDisabled(ctx context.Context) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return context.WithValue(ctx, cityResolverDisableVertexKey, true)
+}
+
+func isCityResolverVertexDisabled(ctx context.Context) bool {
+	if ctx == nil {
+		return false
+	}
+	v, ok := ctx.Value(cityResolverDisableVertexKey).(bool)
+	return ok && v
+}
+
 func newCityResolver(db *gorm.DB, log *zap.Logger) *cityResolver {
 	useVertex := strings.EqualFold(strings.TrimSpace(os.Getenv(signalCityResolverUseVertexEnv)), "true")
 	var vertexClient *cityVertexClient
@@ -93,6 +112,9 @@ func (r *cityResolver) Resolve(ctx context.Context, m model.Market, knownCities 
 		r.persistCache(ctx, key, m.Question, m.Slug, city, "rule")
 		r.storeMem(key, city)
 		return city
+	}
+	if isCityResolverVertexDisabled(ctx) {
+		return ""
 	}
 	if r.vertex == nil {
 		return ""
