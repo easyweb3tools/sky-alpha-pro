@@ -1042,14 +1042,43 @@ func (s *Service) runToolReportValidateWrite(ctx context.Context, result *CycleR
 	}
 	output, err := s.vertexAI.ValidateCycle(ctx, input)
 	if err != nil {
+		fallback := &cycleValidationOutput{
+			Verdict:   "warning",
+			Score:     0,
+			Summary:   "validation fallback: " + err.Error(),
+			Strengths: []string{},
+			Risks:     []string{"vertex validation unavailable"},
+			Actions:   []string{"inspect agent_cycle logs and vertex response payload"},
+		}
+		rowID, persistErr := s.persistValidationReport(ctx, result, input, fallback)
+		if persistErr != nil {
+			return cycleStepExecution{
+				Status: "error",
+				Errors: []CycleIssue{{
+					Code:    "validation_persist_failed",
+					Message: persistErr.Error(),
+					Source:  "report.validate.write",
+					Count:   1,
+				}},
+			}
+		}
 		return cycleStepExecution{
-			Status: "error",
-			Errors: []CycleIssue{{
+			Status: "degraded",
+			Records: []CycleRecord{
+				{Entity: "agent_validation", Result: "success", Count: 1},
+			},
+			Warnings: []CycleIssue{{
 				Code:    "validation_failed",
 				Message: err.Error(),
 				Source:  "report.validate.write",
 				Count:   1,
 			}},
+			Meta: map[string]any{
+				"validation_id": rowID,
+				"verdict":       fallback.Verdict,
+				"score":         fallback.Score,
+				"fallback":      true,
+			},
 		}
 	}
 
@@ -1288,7 +1317,7 @@ func (s *Service) loadPromptBundle(ctx context.Context) (cyclePromptBundle, erro
 		bundle.Version = version
 	}
 	system := strings.TrimSpace(row.SystemPrompt)
-	if system != "" {
+	if len(system) >= 32 {
 		bundle.System = system
 	}
 	return bundle, nil

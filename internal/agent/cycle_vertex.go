@@ -58,6 +58,7 @@ func (v *vertexAIClient) PlanCycle(ctx context.Context, input cyclePromptInput, 
 	if text == "" {
 		return nil, fmt.Errorf("vertex ai returned empty plan")
 	}
+	text = extractJSONObject(text)
 	var out cyclePlanOutput
 	if err := json.Unmarshal([]byte(text), &out); err != nil {
 		return nil, fmt.Errorf("decode cycle plan json: %w", err)
@@ -147,6 +148,7 @@ func (v *vertexAIClient) ValidateCycle(ctx context.Context, input cycleValidatio
 	if text == "" {
 		return nil, fmt.Errorf("vertex ai returned empty validation")
 	}
+	text = extractJSONObject(text)
 	var out cycleValidationOutput
 	if err := json.Unmarshal([]byte(text), &out); err != nil {
 		return nil, fmt.Errorf("decode cycle validation json: %w", err)
@@ -170,4 +172,24 @@ func minInt(a, b int) int {
 		return a
 	}
 	return b
+}
+
+func extractJSONObject(raw string) string {
+	txt := strings.TrimSpace(raw)
+	if txt == "" {
+		return txt
+	}
+	if strings.HasPrefix(txt, "```") {
+		txt = strings.TrimPrefix(txt, "```json")
+		txt = strings.TrimPrefix(txt, "```JSON")
+		txt = strings.TrimPrefix(txt, "```")
+		txt = strings.TrimSuffix(strings.TrimSpace(txt), "```")
+		txt = strings.TrimSpace(txt)
+	}
+	start := strings.Index(txt, "{")
+	end := strings.LastIndex(txt, "}")
+	if start >= 0 && end > start {
+		return txt[start : end+1]
+	}
+	return txt
 }
