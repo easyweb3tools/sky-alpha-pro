@@ -100,6 +100,36 @@ var defaultCityAliases = []cityAlias{
 	{Alias: "detroit", City: "detroit"},
 	{Alias: "pittsburgh", City: "pittsburgh"},
 	{Alias: "cleveland", City: "cleveland"},
+	// Common airport/station aliases used by weather markets.
+	{Alias: "jfk", City: "new york"},
+	{Alias: "lga", City: "new york"},
+	{Alias: "ewr", City: "new york"},
+	{Alias: "central park", City: "new york"},
+	{Alias: "ord", City: "chicago"},
+	{Alias: "ohare", City: "chicago"},
+	{Alias: "o'hare", City: "chicago"},
+	{Alias: "lax", City: "los angeles"},
+	{Alias: "burbank", City: "los angeles"},
+	{Alias: "sfo", City: "san francisco"},
+	{Alias: "oak", City: "san francisco"},
+	{Alias: "sea", City: "seattle"},
+	{Alias: "bos", City: "boston"},
+	{Alias: "mia", City: "miami"},
+	{Alias: "atl", City: "atlanta"},
+	{Alias: "den", City: "denver"},
+	{Alias: "iah", City: "houston"},
+	{Alias: "hou", City: "houston"},
+	{Alias: "phx", City: "phoenix"},
+	{Alias: "dfw", City: "dallas"},
+	{Alias: "dal", City: "dallas"},
+	{Alias: "aus", City: "austin"},
+	{Alias: "mco", City: "orlando"},
+	{Alias: "tpa", City: "tampa"},
+	{Alias: "pdx", City: "portland"},
+	{Alias: "dtw", City: "detroit"},
+	{Alias: "pit", City: "pittsburgh"},
+	{Alias: "cle", City: "cleveland"},
+	{Alias: "las", City: "las vegas"},
 }
 
 func NewService(cfg config.SignalConfig, db *gorm.DB, log *zap.Logger) *Service {
@@ -430,9 +460,15 @@ func (s *Service) loadMarket(ctx context.Context, marketRef string) (*model.Mark
 }
 
 func (s *Service) ensureMarketSpec(ctx context.Context, m model.Market, knownCities []string) (marketSpec, string, error) {
+	marketType := strings.ToLower(strings.TrimSpace(m.MarketType))
+	comparator := normalizeComparator(m.Comparator, marketType)
+	if comparator == "" {
+		comparator = inferComparatorFromQuestion(m.Question)
+	}
+
 	spec := marketSpec{
 		City:       s.resolveCity(ctx, m, knownCities),
-		Comparator: normalizeComparator(m.Comparator, m.MarketType),
+		Comparator: comparator,
 		Status:     strings.ToLower(strings.TrimSpace(m.SpecStatus)),
 	}
 	if spec.Status == "" {
@@ -835,6 +871,29 @@ func normalizeComparator(value string, marketType string) string {
 	case "temperature_low":
 		return "le"
 	case "temperature_high":
+		return "ge"
+	default:
+		return ""
+	}
+}
+
+func inferComparatorFromQuestion(question string) string {
+	q := strings.ToLower(strings.TrimSpace(question))
+	switch {
+	case strings.Contains(q, "below"),
+		strings.Contains(q, "under"),
+		strings.Contains(q, "at most"),
+		strings.Contains(q, "no more than"),
+		strings.Contains(q, "lower"),
+		strings.Contains(q, "at or below"):
+		return "le"
+	case strings.Contains(q, "above"),
+		strings.Contains(q, "over"),
+		strings.Contains(q, "exceed"),
+		strings.Contains(q, "at least"),
+		strings.Contains(q, "no less than"),
+		strings.Contains(q, "higher"),
+		strings.Contains(q, "at or above"):
 		return "ge"
 	default:
 		return ""

@@ -360,7 +360,7 @@ func (s *Service) upsertMarket(ctx context.Context, gm GammaMarket) (*model.Mark
 				"slug":                upsertRow.Slug,
 				"question":            upsertRow.Question,
 				"description":         upsertRow.Description,
-				"city":                upsertRow.City,
+				"city":                gorm.Expr("CASE WHEN EXCLUDED.city IS NOT NULL AND EXCLUDED.city <> '' THEN EXCLUDED.city ELSE markets.city END"),
 				"market_type":         upsertRow.MarketType,
 				"resolution_source":   upsertRow.ResolutionSource,
 				"token_id_yes":        upsertRow.TokenIDYes,
@@ -373,10 +373,15 @@ func (s *Service) upsertMarket(ctx context.Context, gm GammaMarket) (*model.Mark
 				"resolution":          upsertRow.Resolution,
 				"volume_total":        upsertRow.VolumeTotal,
 				"liquidity":           upsertRow.Liquidity,
-				"threshold_f":         upsertRow.ThresholdF,
-				"comparator":          upsertRow.Comparator,
-				"weather_target_date": upsertRow.WeatherTargetDate,
-				"spec_status":         upsertRow.SpecStatus,
+				"threshold_f":         gorm.Expr("CASE WHEN EXCLUDED.threshold_f IS NOT NULL THEN EXCLUDED.threshold_f ELSE markets.threshold_f END"),
+				"comparator":          gorm.Expr("CASE WHEN EXCLUDED.comparator IS NOT NULL AND EXCLUDED.comparator <> '' THEN EXCLUDED.comparator ELSE markets.comparator END"),
+				"weather_target_date": gorm.Expr("CASE WHEN EXCLUDED.weather_target_date IS NOT NULL THEN EXCLUDED.weather_target_date ELSE markets.weather_target_date END"),
+				"spec_status": gorm.Expr(`CASE
+					WHEN COALESCE(EXCLUDED.spec_status,'') = 'ready' THEN 'ready'
+					WHEN COALESCE(markets.spec_status,'') = 'ready' THEN 'ready'
+					WHEN COALESCE(EXCLUDED.spec_status,'') = '' THEN markets.spec_status
+					ELSE EXCLUDED.spec_status
+				END`),
 				"updated_at":          time.Now().UTC(),
 			}),
 		}).
