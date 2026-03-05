@@ -16,12 +16,13 @@ import (
 	"sky-alpha-pro/internal/chain"
 	"sky-alpha-pro/internal/market"
 	"sky-alpha-pro/internal/model"
+	"sky-alpha-pro/internal/signal"
 	"sky-alpha-pro/internal/sim"
 	"sky-alpha-pro/internal/weather"
 	"sky-alpha-pro/pkg/config"
 )
 
-func RegisterDefaultJobs(mgr *Manager, cfg *config.Config, db *gorm.DB, marketSvc *market.Service, weatherSvc *weather.Service, chainSvc *chain.Service, simSvc *sim.Service, agentSvc *agent.Service, log *zap.Logger) {
+func RegisterDefaultJobs(mgr *Manager, cfg *config.Config, db *gorm.DB, marketSvc *market.Service, signalSvc *signal.Service, weatherSvc *weather.Service, chainSvc *chain.Service, simSvc *sim.Service, agentSvc *agent.Service, log *zap.Logger) {
 	if mgr == nil || cfg == nil {
 		return
 	}
@@ -63,6 +64,61 @@ func RegisterDefaultJobs(mgr *Manager, cfg *config.Config, db *gorm.DB, marketSv
 					})
 				}
 				out.Freshness = map[string]float64{"markets": 0}
+				return out, nil
+			},
+		})
+	}
+
+	spc := cfg.Scheduler.Jobs.MarketSpecFill
+	if spc.Enabled && spc.Interval > 0 && signalSvc != nil {
+		mgr.Register(Job{
+			Name:      "market_spec_fill",
+			Interval:  spc.Interval,
+			Timeout:   spc.Timeout,
+			Immediate: spc.Immediate,
+			Run: func(ctx context.Context) (JobResult, error) {
+				limit := spc.Limit
+				if limit <= 0 {
+					limit = 300
+				}
+				onlyMissing := spc.OnlyMissing
+				res, err := signalSvc.ResolveMarketCities(ctx, signal.ResolveCitiesOptions{
+					Limit:       limit,
+					OnlyMissing: onlyMissing,
+				})
+				if err != nil {
+					return JobResult{}, err
+				}
+				out := JobResult{
+					Records: []FetchRecord{
+						{Entity: "markets_spec_processed", Result: "success", Count: res.Processed},
+						{Entity: "markets_spec_ready", Result: "success", Count: res.SpecReady},
+						{Entity: "markets_city_resolved", Result: "success", Count: res.Resolved},
+						{Entity: "markets_city_unresolved", Result: "skipped", Count: res.Unresolved},
+					},
+					Freshness: map[string]float64{"markets": 0},
+				}
+				if len(res.Errors) > 0 {
+					out.Warnings = append(out.Warnings, JobIssue{
+						Code:    "market_spec_fill_partial",
+						Message: fmt.Sprintf("market spec fill finished with %d errors", len(res.Errors)),
+						Source:  "market_spec_fill",
+						Count:   len(res.Errors),
+					})
+				}
+				if db != nil && mgr != nil && mgr.metrics != nil {
+					var activeTotal int64
+					var specReady int64
+					var cityMissing int64
+					_ = db.WithContext(ctx).Table("markets").Where("is_active = ?", true).Count(&activeTotal).Error
+					_ = db.WithContext(ctx).Table("markets").Where("is_active = ? AND spec_status = 'ready'", true).Count(&specReady).Error
+					_ = db.WithContext(ctx).Table("markets").Where("is_active = ? AND COALESCE(city,'') = ''", true).Count(&cityMissing).Error
+					successRate := 0.0
+					if activeTotal > 0 {
+						successRate = float64(specReady) / float64(activeTotal)
+					}
+					mgr.metrics.SetMarketSpecCoverage(float64(specReady), float64(cityMissing), successRate)
+				}
 				return out, nil
 			},
 		})

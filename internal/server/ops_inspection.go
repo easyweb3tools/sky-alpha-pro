@@ -29,6 +29,7 @@ type opsInspectionResponse struct {
 	ValueDashboard   inspectionValueDashboard  `json:"value_dashboard"`
 	Profitability    profitabilityConclusion   `json:"profitability"`
 	ValidationStatus inspectionValidationStats `json:"validation_status"`
+	Alerts           []inspectionAlert         `json:"alerts"`
 }
 
 type inspectionLedger struct {
@@ -78,6 +79,11 @@ type inspectionValueDashboard struct {
 	P50Edge30D              float64 `json:"p50_edge_30d"`
 	P90Edge30D              float64 `json:"p90_edge_30d"`
 	MaxDrawdown30D          float64 `json:"max_drawdown_30d"`
+	LatestMarketsTotal      int64   `json:"latest_markets_total"`
+	LatestSpecReady         int64   `json:"latest_spec_ready"`
+	LatestForecastReady     int64   `json:"latest_forecast_ready"`
+	LatestSignalsGenerated  int64   `json:"latest_signals_generated"`
+	LatestSkipped           int64   `json:"latest_skipped"`
 }
 
 type profitabilityConclusion struct {
@@ -91,6 +97,12 @@ type inspectionValidationStats struct {
 	LastVerdict string  `json:"last_verdict,omitempty"`
 	LastScore   float64 `json:"last_score,omitempty"`
 	LastAt      *string `json:"last_at,omitempty"`
+}
+
+type inspectionAlert struct {
+	Code     string `json:"code"`
+	Severity string `json:"severity"`
+	Message  string `json:"message"`
 }
 
 func OpsInspectionHandler(db *gorm.DB, metricReg *metrics.Registry, schedulerMgr *scheduler.Manager) gin.HandlerFunc {
@@ -126,6 +138,7 @@ func OpsInspectionHandler(db *gorm.DB, metricReg *metrics.Registry, schedulerMgr
 				HealthReady: false,
 				ValueReady:  false,
 			},
+			Alerts: make([]inspectionAlert, 0),
 		}
 		if schedulerMgr != nil {
 			resp.Scheduler = schedulerMgr.Snapshot()
@@ -161,6 +174,7 @@ func OpsInspectionHandler(db *gorm.DB, metricReg *metrics.Registry, schedulerMgr
 		}
 
 		resp.Profitability = concludeProfitability(resp)
+		resp.Alerts = buildInspectionAlerts(resp)
 		c.JSON(http.StatusOK, resp)
 	}
 }
@@ -353,6 +367,27 @@ func fillInspectionValueDashboard(ctx context.Context, db *gorm.DB, out *inspect
 		return err
 	}
 	out.MaxDrawdown30D = roundTo(dd, 4)
+
+	type latestRun struct {
+		MarketsTotal     int64 `gorm:"column:markets_total"`
+		SpecReady        int64 `gorm:"column:spec_ready"`
+		ForecastReady    int64 `gorm:"column:forecast_ready"`
+		SignalsGenerated int64 `gorm:"column:signals_generated"`
+		Skipped          int64 `gorm:"column:skipped"`
+	}
+	var lr latestRun
+	if err := db.WithContext(ctx).Table("signal_runs").
+		Select("markets_total, spec_ready, forecast_ready, signals_generated, skipped").
+		Order("id DESC").
+		Limit(1).
+		Scan(&lr).Error; err != nil {
+		return err
+	}
+	out.LatestMarketsTotal = lr.MarketsTotal
+	out.LatestSpecReady = lr.SpecReady
+	out.LatestForecastReady = lr.ForecastReady
+	out.LatestSignalsGenerated = lr.SignalsGenerated
+	out.LatestSkipped = lr.Skipped
 	return nil
 }
 
@@ -494,4 +529,37 @@ func concludeProfitability(resp opsInspectionResponse) profitabilityConclusion {
 		ValueReady:  valueReady,
 		Reason:      reason,
 	}
+}
+
+func buildInspectionAlerts(resp opsInspectionResponse) []inspectionAlert {
+	out := make([]inspectionAlert, 0, 4)
+	if resp.Summary.Degraded {
+		out = append(out, inspectionAlert{
+			Code:     "system_degraded",
+			Severity: "critical",
+			Message:  "scheduler summary reports degraded state",
+		})
+	}
+	if resp.ValueDashboard.LatestMarketsTotal > 0 && resp.ValueDashboard.LatestSpecReady == 0 {
+		out = append(out, inspectionAlert{
+			Code:     "signal_funnel_spec_blocked",
+			Severity: "critical",
+			Message:  "latest signal run has markets_total>0 but spec_ready=0",
+		})
+	}
+	if resp.ValueDashboard.Signals7D == 0 {
+		out = append(out, inspectionAlert{
+			Code:     "signals_zero_7d",
+			Severity: "warning",
+			Message:  "no signals generated in the last 7 days",
+		})
+	}
+	if resp.ValueDashboard.Trades7D == 0 {
+		out = append(out, inspectionAlert{
+			Code:     "trades_zero_7d",
+			Severity: "warning",
+			Message:  "no trades executed in the last 7 days",
+		})
+	}
+	return out
 }

@@ -55,7 +55,7 @@ func newServeCmd() *cobra.Command {
 
 			schedulerMgr := scheduler.NewManager(appConfig.Scheduler, appLogger, metricReg)
 			schedulerMgr.SetRunRecorder(scheduler.NewGormRunRecorder(db))
-			scheduler.RegisterDefaultJobs(schedulerMgr, appConfig, db, services.Market, services.Weather, services.Chain, simSvc, services.Agent, appLogger)
+			scheduler.RegisterDefaultJobs(schedulerMgr, appConfig, db, services.Market, services.Signal, services.Weather, services.Chain, simSvc, services.Agent, appLogger)
 
 			handler := server.NewRouterWithServices(appConfig, appLogger, db, metricReg, services, schedulerMgr)
 			httpServer := &http.Server{

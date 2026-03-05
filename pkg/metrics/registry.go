@@ -39,6 +39,9 @@ type Registry struct {
 	agentCycleToolErrors         *prometheus.CounterVec
 	agentCycleFallbackTotal      *prometheus.CounterVec
 	agentMemoryHitTotal          prometheus.Counter
+	marketSpecReadyTotal         prometheus.Gauge
+	marketCityMissingTotal       prometheus.Gauge
+	marketSpecFillSuccessRate    prometheus.Gauge
 
 	cacheMu               sync.RWMutex
 	dataFreshnessSnapshot map[string]float64
@@ -181,6 +184,24 @@ func New(cfg config.MetricsConfig) *Registry {
 			Name:      "memory_hit_total",
 			Help:      "Total memory summaries injected into agent cycle context.",
 		}),
+		marketSpecReadyTotal: prometheus.NewGauge(prometheus.GaugeOpts{
+			Namespace: "sky_alpha",
+			Subsystem: "signal",
+			Name:      "markets_spec_ready_total",
+			Help:      "Active markets with spec_status=ready.",
+		}),
+		marketCityMissingTotal: prometheus.NewGauge(prometheus.GaugeOpts{
+			Namespace: "sky_alpha",
+			Subsystem: "signal",
+			Name:      "markets_city_missing_total",
+			Help:      "Active markets with missing city.",
+		}),
+		marketSpecFillSuccessRate: prometheus.NewGauge(prometheus.GaugeOpts{
+			Namespace: "sky_alpha",
+			Subsystem: "signal",
+			Name:      "spec_fill_success_rate",
+			Help:      "Spec fill success rate among active markets (0~1).",
+		}),
 		dataFreshnessSeconds: prometheus.NewGaugeVec(prometheus.GaugeOpts{
 			Namespace: "sky_alpha",
 			Subsystem: "data",
@@ -219,6 +240,9 @@ func New(cfg config.MetricsConfig) *Registry {
 		r.agentCycleToolErrors,
 		r.agentCycleFallbackTotal,
 		r.agentMemoryHitTotal,
+		r.marketSpecReadyTotal,
+		r.marketCityMissingTotal,
+		r.marketSpecFillSuccessRate,
 		r.dataFreshnessSeconds,
 		r.fetchDataFreshnessSeconds,
 	)
@@ -416,6 +440,21 @@ func (r *Registry) AddAgentMemoryHits(n int) {
 		return
 	}
 	r.agentMemoryHitTotal.Add(float64(n))
+}
+
+func (r *Registry) SetMarketSpecCoverage(specReady, cityMissing, successRate float64) {
+	if !r.Enabled() {
+		return
+	}
+	r.marketSpecReadyTotal.Set(specReady)
+	r.marketCityMissingTotal.Set(cityMissing)
+	if successRate < 0 {
+		successRate = 0
+	}
+	if successRate > 1 {
+		successRate = 1
+	}
+	r.marketSpecFillSuccessRate.Set(successRate)
 }
 
 func (r *Registry) SnapshotDataFreshness() map[string]float64 {

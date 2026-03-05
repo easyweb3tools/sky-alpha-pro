@@ -140,11 +140,12 @@ type SchedulerConfig struct {
 }
 
 type SchedulerJobsConfig struct {
-	MarketSync      SchedulerJobConfig        `mapstructure:"market_sync"`
-	WeatherForecast SchedulerWeatherJobConfig `mapstructure:"weather_forecast"`
-	ChainScan       SchedulerChainJobConfig   `mapstructure:"chain_scan"`
-	SimCycle        SchedulerJobConfig        `mapstructure:"sim_cycle"`
-	AgentCycle      SchedulerAgentJobConfig   `mapstructure:"agent_cycle"`
+	MarketSync      SchedulerJobConfig         `mapstructure:"market_sync"`
+	MarketSpecFill  SchedulerSpecFillJobConfig `mapstructure:"market_spec_fill"`
+	WeatherForecast SchedulerWeatherJobConfig  `mapstructure:"weather_forecast"`
+	ChainScan       SchedulerChainJobConfig    `mapstructure:"chain_scan"`
+	SimCycle        SchedulerJobConfig         `mapstructure:"sim_cycle"`
+	AgentCycle      SchedulerAgentJobConfig    `mapstructure:"agent_cycle"`
 }
 
 type SchedulerJobConfig struct {
@@ -171,6 +172,15 @@ type SchedulerChainJobConfig struct {
 	Immediate      bool          `mapstructure:"immediate"`
 	LookbackBlocks uint64        `mapstructure:"lookback_blocks"`
 	MaxTx          int           `mapstructure:"max_tx"`
+}
+
+type SchedulerSpecFillJobConfig struct {
+	Enabled     bool          `mapstructure:"enabled"`
+	Interval    time.Duration `mapstructure:"interval"`
+	Timeout     time.Duration `mapstructure:"timeout"`
+	Immediate   bool          `mapstructure:"immediate"`
+	Limit       int           `mapstructure:"limit"`
+	OnlyMissing bool          `mapstructure:"only_missing"`
 }
 
 type SchedulerAgentJobConfig struct {
@@ -313,6 +323,12 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("scheduler.jobs.market_sync.interval", "5m")
 	v.SetDefault("scheduler.jobs.market_sync.timeout", "90s")
 	v.SetDefault("scheduler.jobs.market_sync.immediate", true)
+	v.SetDefault("scheduler.jobs.market_spec_fill.enabled", true)
+	v.SetDefault("scheduler.jobs.market_spec_fill.interval", "10m")
+	v.SetDefault("scheduler.jobs.market_spec_fill.timeout", "60s")
+	v.SetDefault("scheduler.jobs.market_spec_fill.immediate", true)
+	v.SetDefault("scheduler.jobs.market_spec_fill.limit", 300)
+	v.SetDefault("scheduler.jobs.market_spec_fill.only_missing", true)
 	v.SetDefault("scheduler.jobs.weather_forecast.enabled", true)
 	v.SetDefault("scheduler.jobs.weather_forecast.interval", "15m")
 	v.SetDefault("scheduler.jobs.weather_forecast.timeout", "120s")
