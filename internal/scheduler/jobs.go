@@ -98,6 +98,24 @@ func RegisterDefaultJobs(mgr *Manager, cfg *config.Config, db *gorm.DB, marketSv
 					},
 					Freshness: map[string]float64{"markets": 0},
 				}
+				if res.Processed == 0 {
+					out.SkipReason = "no eligible markets for spec fill"
+					out.Errors = append(out.Errors, JobIssue{
+						Code:    "spec_fill_no_eligible_markets",
+						Message: "market spec fill skipped: no eligible markets",
+						Source:  "market_spec_fill",
+						Count:   1,
+					})
+				} else if res.SpecReady == 0 {
+					// Empty-run success is misleading for ops; surface as skipped_no_input.
+					out.SkipReason = "spec_ready remained zero"
+					out.Errors = append(out.Errors, JobIssue{
+						Code:    "spec_fill_no_progress",
+						Message: "market spec fill skipped: processed markets but spec_ready stayed zero",
+						Source:  "market_spec_fill",
+						Count:   res.Processed,
+					})
+				}
 				if len(res.Errors) > 0 {
 					out.Warnings = append(out.Warnings, JobIssue{
 						Code:    "market_spec_fill_partial",
