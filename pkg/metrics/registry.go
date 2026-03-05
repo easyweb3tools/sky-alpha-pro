@@ -283,6 +283,24 @@ func (r *Registry) SetJobNextRun(job string, at time.Time) {
 	r.jobNextRunTimestamp.WithLabelValues(job).Set(float64(at.Unix()))
 }
 
+func (r *Registry) InitSchedulerJob(job string) {
+	if !r.Enabled() {
+		return
+	}
+	name := strings.TrimSpace(job)
+	if name == "" {
+		return
+	}
+	r.jobInflight.WithLabelValues(name).Set(0)
+	r.jobConsecutiveFailures.WithLabelValues(name).Set(0)
+	r.schedulerConsecutiveFailures.WithLabelValues(name).Set(0)
+	r.jobRunsTotal.WithLabelValues(name, "success").Add(0)
+	r.jobRunsTotal.WithLabelValues(name, "error").Add(0)
+	r.jobRunsTotal.WithLabelValues(name, "timeout").Add(0)
+	r.jobRunsTotal.WithLabelValues(name, "skipped_no_input").Add(0)
+	r.jobErrorsTotal.WithLabelValues(name, "unknown_error").Add(0)
+}
+
 func (r *Registry) SetJobConsecutiveFailures(job string, n float64) {
 	if !r.Enabled() {
 		return

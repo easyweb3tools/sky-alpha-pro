@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"math"
 	"net/http"
@@ -245,15 +246,15 @@ func fillInspectionDataSnapshot(ctx context.Context, db *gorm.DB, out *inspectio
 	}
 
 	setMax := func(key, table, col string) error {
-		var v *time.Time
+		var v sql.NullTime
 		if err := db.WithContext(ctx).Table(table).Select("MAX(" + col + ")").Scan(&v).Error; err != nil {
 			return err
 		}
-		if v == nil || v.IsZero() {
+		if !v.Valid || v.Time.IsZero() {
 			out.LastUpdated[key] = nil
 			return nil
 		}
-		s := v.UTC().Format(time.RFC3339)
+		s := v.Time.UTC().Format(time.RFC3339)
 		out.LastUpdated[key] = &s
 		return nil
 	}
