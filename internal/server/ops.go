@@ -199,7 +199,7 @@ func summarizeSchedulerSnapshot(s scheduler.ManagerSnapshot) opsSummary {
 }
 
 func isHealthyJobStatus(status string) bool {
-	return status == "" || status == "success"
+	return status == "" || status == "success" || status == "skipped_no_input"
 }
 
 func classifySeverity(status, code string, consecutive int) string {

@@ -28,6 +28,7 @@ type opsInspectionResponse struct {
 	DataSnapshot     inspectionDataSnapshot    `json:"data_snapshot"`
 	ValueDashboard   inspectionValueDashboard  `json:"value_dashboard"`
 	SpecFillTrend    inspectionSpecFillTrend   `json:"spec_fill_trend"`
+	SpecFillDiag     inspectionSpecFillDiag    `json:"spec_fill_diagnostics"`
 	Profitability    profitabilityConclusion   `json:"profitability"`
 	ValidationStatus inspectionValidationStats `json:"validation_status"`
 	Alerts           []inspectionAlert         `json:"alerts"`
@@ -94,6 +95,9 @@ type inspectionSpecFillTrend struct {
 	Error24H       int64                       `json:"error_24h"`
 	Skipped24H     int64                       `json:"skipped_24h"`
 	SuccessRate24H float64                     `json:"success_rate_24h"`
+	EffectiveSuccess24H     int64              `json:"effective_success_24h"`
+	EffectiveSuccessRate24H float64            `json:"effective_success_rate_24h"`
+	NoProgress24H           int64              `json:"no_progress_24h"`
 	Hourly         []inspectionSpecFillHourAgg `json:"hourly"`
 }
 
@@ -104,6 +108,19 @@ type inspectionSpecFillHourAgg struct {
 	Error       int64   `json:"error"`
 	Skipped     int64   `json:"skipped"`
 	SuccessRate float64 `json:"success_rate"`
+	EffectiveSuccess     int64   `json:"effective_success"`
+	EffectiveSuccessRate float64 `json:"effective_success_rate"`
+	NoProgress           int64   `json:"no_progress"`
+}
+
+type inspectionSpecFillDiag struct {
+	ActiveMarkets       int64            `json:"active_markets"`
+	SpecReady           int64            `json:"spec_ready"`
+	CityMissing         int64            `json:"city_missing"`
+	ThresholdMissing    int64            `json:"threshold_missing"`
+	ComparatorMissing   int64            `json:"comparator_missing"`
+	TargetDateMissing   int64            `json:"target_date_missing"`
+	BySpecStatus        map[string]int64 `json:"by_spec_status"`
 }
 
 type profitabilityConclusion struct {
@@ -158,6 +175,9 @@ func OpsInspectionHandler(db *gorm.DB, metricReg *metrics.Registry, schedulerMgr
 				WindowHours: 24,
 				Hourly:      make([]inspectionSpecFillHourAgg, 0),
 			},
+			SpecFillDiag: inspectionSpecFillDiag{
+				BySpecStatus: map[string]int64{},
+			},
 			Profitability: profitabilityConclusion{
 				HealthReady: false,
 				ValueReady:  false,
@@ -199,6 +219,12 @@ func OpsInspectionHandler(db *gorm.DB, metricReg *metrics.Registry, schedulerMgr
 		if err := fillSpecFillTrend(c.Request.Context(), db, &resp.SpecFillTrend); err != nil {
 			c.JSON(http.StatusServiceUnavailable, gin.H{
 				"error": gin.H{"code": "OPS_SPEC_FILL_TREND_FAILED", "message": err.Error()},
+			})
+			return
+		}
+		if err := fillSpecFillDiagnostics(c.Request.Context(), db, &resp.SpecFillDiag); err != nil {
+			c.JSON(http.StatusServiceUnavailable, gin.H{
+				"error": gin.H{"code": "OPS_SPEC_FILL_DIAG_FAILED", "message": err.Error()},
 			})
 			return
 		}
@@ -472,13 +498,19 @@ func fillSpecFillTrend(ctx context.Context, db *gorm.DB, out *inspectionSpecFill
 		switch {
 		case status == "success":
 			out.Success24H++
+			out.EffectiveSuccess24H++
 			hour.Success++
+			hour.EffectiveSuccess++
 		case status == "error" || status == "timeout":
 			out.Error24H++
 			hour.Error++
 		case strings.HasPrefix(status, "skipped"):
 			out.Skipped24H++
 			hour.Skipped++
+			if strings.TrimSpace(row.Status) == "skipped_no_input" {
+				out.NoProgress24H++
+				hour.NoProgress++
+			}
 		default:
 			out.Error24H++
 			hour.Error++
@@ -486,17 +518,63 @@ func fillSpecFillTrend(ctx context.Context, db *gorm.DB, out *inspectionSpecFill
 	}
 	if out.Runs24H > 0 {
 		out.SuccessRate24H = roundTo(float64(out.Success24H)/float64(out.Runs24H), 4)
+		out.EffectiveSuccessRate24H = roundTo(float64(out.EffectiveSuccess24H)/float64(out.Runs24H), 4)
 	}
 	out.Hourly = out.Hourly[:0]
 	for _, item := range hourlyMap {
 		if item.Runs > 0 {
 			item.SuccessRate = roundTo(float64(item.Success)/float64(item.Runs), 4)
+			item.EffectiveSuccessRate = roundTo(float64(item.EffectiveSuccess)/float64(item.Runs), 4)
 		}
 		out.Hourly = append(out.Hourly, *item)
 	}
 	sort.Slice(out.Hourly, func(i, j int) bool {
 		return out.Hourly[i].Hour < out.Hourly[j].Hour
 	})
+	return nil
+}
+
+func fillSpecFillDiagnostics(ctx context.Context, db *gorm.DB, out *inspectionSpecFillDiag) error {
+	if err := db.WithContext(ctx).Table("markets").Where("is_active = ?", true).Count(&out.ActiveMarkets).Error; err != nil {
+		return err
+	}
+	if err := db.WithContext(ctx).Table("markets").Where("is_active = ? AND spec_status = 'ready'", true).Count(&out.SpecReady).Error; err != nil {
+		return err
+	}
+	if err := db.WithContext(ctx).Table("markets").Where("is_active = ? AND COALESCE(city,'') = ''", true).Count(&out.CityMissing).Error; err != nil {
+		return err
+	}
+	if err := db.WithContext(ctx).Table("markets").Where("is_active = ? AND threshold_f IS NULL", true).Count(&out.ThresholdMissing).Error; err != nil {
+		return err
+	}
+	if err := db.WithContext(ctx).Table("markets").Where("is_active = ? AND COALESCE(comparator,'') = ''", true).Count(&out.ComparatorMissing).Error; err != nil {
+		return err
+	}
+	if err := db.WithContext(ctx).Table("markets").Where("is_active = ? AND weather_target_date IS NULL", true).Count(&out.TargetDateMissing).Error; err != nil {
+		return err
+	}
+
+	type statusRow struct {
+		SpecStatus string `gorm:"column:spec_status"`
+		Count      int64  `gorm:"column:count"`
+	}
+	var rows []statusRow
+	if err := db.WithContext(ctx).Table("markets").
+		Select("COALESCE(spec_status,'') AS spec_status, COUNT(*) AS count").
+		Where("is_active = ?", true).
+		Group("COALESCE(spec_status,'')").
+		Order("count DESC").
+		Scan(&rows).Error; err != nil {
+		return err
+	}
+	out.BySpecStatus = make(map[string]int64, len(rows))
+	for _, row := range rows {
+		key := strings.TrimSpace(row.SpecStatus)
+		if key == "" {
+			key = "unknown"
+		}
+		out.BySpecStatus[key] = row.Count
+	}
 	return nil
 }
 

@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/shopspring/decimal"
 	"go.uber.org/zap"
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
@@ -148,13 +149,13 @@ func TestSummarizeSchedulerSnapshot(t *testing.T) {
 	if !summary.Degraded {
 		t.Fatalf("expected degraded=true")
 	}
-	if summary.TotalJobs != 3 || summary.HealthyJobs != 1 || summary.UnhealthyJobs != 2 {
+	if summary.TotalJobs != 3 || summary.HealthyJobs != 2 || summary.UnhealthyJobs != 1 {
 		t.Fatalf("unexpected summary counters: %+v", summary)
 	}
-	if len(summary.Blockers) != 2 {
-		t.Fatalf("expected 2 blockers, got %d", len(summary.Blockers))
+	if len(summary.Blockers) != 1 {
+		t.Fatalf("expected 1 blocker, got %d", len(summary.Blockers))
 	}
-	if summary.Blockers[0].Severity == "" || summary.Blockers[1].Severity == "" {
+	if summary.Blockers[0].Severity == "" {
 		t.Fatalf("expected blockers with severity, got %+v", summary.Blockers)
 	}
 }
@@ -329,10 +330,91 @@ func TestFillSpecFillTrend(t *testing.T) {
 	if out.Success24H != 1 || out.Error24H != 1 || out.Skipped24H != 1 {
 		t.Fatalf("unexpected counters: %+v", out)
 	}
+	if out.EffectiveSuccess24H != 1 || out.NoProgress24H != 1 {
+		t.Fatalf("unexpected effective counters: %+v", out)
+	}
 	if out.SuccessRate24H != 0.3333 {
 		t.Fatalf("expected success_rate_24h=0.3333, got %.4f", out.SuccessRate24H)
 	}
+	if out.EffectiveSuccessRate24H != 0.3333 {
+		t.Fatalf("expected effective_success_rate_24h=0.3333, got %.4f", out.EffectiveSuccessRate24H)
+	}
 	if len(out.Hourly) == 0 {
 		t.Fatalf("expected non-empty hourly trend")
+	}
+}
+
+func TestFillSpecFillDiagnostics(t *testing.T) {
+	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{
+		Logger: logger.Default.LogMode(logger.Silent),
+	})
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	schema := `
+CREATE TABLE markets (
+	id TEXT PRIMARY KEY,
+	polymarket_id TEXT NOT NULL,
+	question TEXT NOT NULL,
+	city TEXT,
+	market_type TEXT NOT NULL,
+	end_date DATETIME NOT NULL,
+	is_active BOOLEAN NOT NULL DEFAULT 1,
+	threshold_f DECIMAL(6,2),
+	comparator TEXT,
+	weather_target_date DATETIME,
+	spec_status TEXT,
+	created_at DATETIME NOT NULL,
+	updated_at DATETIME NOT NULL
+);`
+	if err := db.Exec(schema).Error; err != nil {
+		t.Fatalf("create markets table: %v", err)
+	}
+
+	now := time.Now().UTC()
+	target := now.Add(24 * time.Hour)
+	rows := []map[string]any{
+		{
+			"id":                  "m1",
+			"polymarket_id":       "pm1",
+			"question":            "Will NYC exceed 70F?",
+			"city":                "new york",
+			"market_type":         "temperature_high",
+			"end_date":            now.Add(48 * time.Hour),
+			"is_active":           true,
+			"threshold_f":         decimal.NewFromFloat(70),
+			"comparator":          "ge",
+			"weather_target_date": target,
+			"spec_status":         "ready",
+			"created_at":          now,
+			"updated_at":          now,
+		},
+		{
+			"id":            "m2",
+			"polymarket_id": "pm2",
+			"question":      "Will temp be above 60F?",
+			"city":          "",
+			"market_type":   "unknown",
+			"end_date":      now.Add(48 * time.Hour),
+			"is_active":     true,
+			"spec_status":   "missing_city",
+			"created_at":    now,
+			"updated_at":    now,
+		},
+	}
+	if err := db.Table("markets").Create(&rows).Error; err != nil {
+		t.Fatalf("seed markets: %v", err)
+	}
+
+	out := inspectionSpecFillDiag{BySpecStatus: map[string]int64{}}
+	if err := fillSpecFillDiagnostics(context.Background(), db, &out); err != nil {
+		t.Fatalf("fill diag: %v", err)
+	}
+
+	if out.ActiveMarkets != 2 || out.SpecReady != 1 || out.CityMissing != 1 {
+		t.Fatalf("unexpected counters: %+v", out)
+	}
+	if out.BySpecStatus["ready"] != 1 || out.BySpecStatus["missing_city"] != 1 {
+		t.Fatalf("unexpected by_spec_status: %+v", out.BySpecStatus)
 	}
 }
