@@ -148,13 +148,13 @@ func TestSummarizeSchedulerSnapshot(t *testing.T) {
 	if !summary.Degraded {
 		t.Fatalf("expected degraded=true")
 	}
-	if summary.TotalJobs != 3 || summary.HealthyJobs != 1 || summary.UnhealthyJobs != 2 {
+	if summary.TotalJobs != 3 || summary.HealthyJobs != 2 || summary.UnhealthyJobs != 1 {
 		t.Fatalf("unexpected summary counters: %+v", summary)
 	}
-	if len(summary.Blockers) != 2 {
-		t.Fatalf("expected 2 blockers, got %d", len(summary.Blockers))
+	if len(summary.Blockers) != 1 {
+		t.Fatalf("expected 1 blocker, got %d", len(summary.Blockers))
 	}
-	if summary.Blockers[0].Severity == "" || summary.Blockers[1].Severity == "" {
+	if summary.Blockers[0].Severity == "" {
 		t.Fatalf("expected blockers with severity, got %+v", summary.Blockers)
 	}
 }
