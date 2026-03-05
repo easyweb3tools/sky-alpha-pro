@@ -31,6 +31,7 @@ type Market struct {
 	Comparator        string              `gorm:"column:comparator;size:8"`
 	WeatherTargetDate *time.Time          `gorm:"column:weather_target_date;type:date;index:idx_markets_weather_target_date"`
 	SpecStatus        string              `gorm:"column:spec_status;size:20;default:incomplete;index:idx_markets_spec_status"`
+	IsSignalSupported bool                `gorm:"column:is_signal_supported;default:false;index:idx_markets_signal_supported"`
 	CreatedAt         time.Time           `gorm:"column:created_at"`
 	UpdatedAt         time.Time           `gorm:"column:updated_at"`
 }
@@ -252,6 +253,8 @@ type PromptVersion struct {
 	RuntimeTemplate string         `gorm:"column:runtime_template;type:text;not null"`
 	ContextTemplate string         `gorm:"column:context_template;type:text;not null"`
 	SchemaJSON      datatypes.JSON `gorm:"column:schema_json;type:jsonb"`
+	Stage           string         `gorm:"column:stage;size:20;default:active;index:idx_prompt_versions_stage"`
+	RolloutPct      float64        `gorm:"column:rollout_pct;type:decimal(5,2);default:0"`
 	IsActive        bool           `gorm:"column:is_active;default:false;index:idx_prompt_versions_active"`
 	CreatedAt       time.Time      `gorm:"column:created_at;not null"`
 	UpdatedAt       time.Time      `gorm:"column:updated_at"`
@@ -261,11 +264,13 @@ type AgentSession struct {
 	ID               string         `gorm:"column:id;type:uuid;primaryKey"`
 	CycleID          string         `gorm:"column:cycle_id;size:64;index:idx_agent_sessions_cycle"`
 	PromptVersion    string         `gorm:"column:prompt_version;size:40;not null"`
+	PromptVariant    string         `gorm:"column:prompt_variant;size:20;default:active"`
 	RunMode          string         `gorm:"column:run_mode;size:20;not null"`
 	Model            string         `gorm:"column:model;size:80"`
 	Status           string         `gorm:"column:status;size:20;not null;index:idx_agent_sessions_status"`
 	Decision         string         `gorm:"column:decision;size:20"`
 	LLMCalls         int            `gorm:"column:llm_calls;default:0"`
+	LLMTokens        int            `gorm:"column:llm_tokens;default:0"`
 	ToolCalls        int            `gorm:"column:tool_calls;default:0"`
 	RecordsSuccess   int            `gorm:"column:records_success;default:0"`
 	RecordsError     int            `gorm:"column:records_error;default:0"`
@@ -325,19 +330,105 @@ type AgentReport struct {
 }
 
 type AgentValidation struct {
+	ID             uint64         `gorm:"column:id;primaryKey;autoIncrement"`
+	SessionID      string         `gorm:"column:session_id;type:uuid;not null;index:idx_agent_validations_session,priority:1"`
+	CycleID        string         `gorm:"column:cycle_id;size:64;index:idx_agent_validations_cycle"`
+	ValidatorModel string         `gorm:"column:validator_model;size:80"`
+	Verdict        string         `gorm:"column:verdict;size:20;not null;index:idx_agent_validations_verdict"`
+	Score          float64        `gorm:"column:score;type:decimal(5,2)"`
+	Summary        string         `gorm:"column:summary;type:text"`
+	StrengthsJSON  datatypes.JSON `gorm:"column:strengths_json;type:jsonb"`
+	RisksJSON      datatypes.JSON `gorm:"column:risks_json;type:jsonb"`
+	ActionsJSON    datatypes.JSON `gorm:"column:actions_json;type:jsonb"`
+	InputJSON      datatypes.JSON `gorm:"column:input_json;type:jsonb"`
+	OutputJSON     datatypes.JSON `gorm:"column:output_json;type:jsonb"`
+	CreatedAt      time.Time      `gorm:"column:created_at;not null;index:idx_agent_validations_session,sort:desc,priority:2"`
+}
+
+type AgentStrategyChange struct {
 	ID              uint64         `gorm:"column:id;primaryKey;autoIncrement"`
-	SessionID       string         `gorm:"column:session_id;type:uuid;not null;index:idx_agent_validations_session,priority:1"`
-	CycleID         string         `gorm:"column:cycle_id;size:64;index:idx_agent_validations_cycle"`
-	ValidatorModel  string         `gorm:"column:validator_model;size:80"`
-	Verdict         string         `gorm:"column:verdict;size:20;not null;index:idx_agent_validations_verdict"`
-	Score           float64        `gorm:"column:score;type:decimal(5,2)"`
-	Summary         string         `gorm:"column:summary;type:text"`
-	StrengthsJSON   datatypes.JSON `gorm:"column:strengths_json;type:jsonb"`
-	RisksJSON       datatypes.JSON `gorm:"column:risks_json;type:jsonb"`
-	ActionsJSON     datatypes.JSON `gorm:"column:actions_json;type:jsonb"`
-	InputJSON       datatypes.JSON `gorm:"column:input_json;type:jsonb"`
-	OutputJSON      datatypes.JSON `gorm:"column:output_json;type:jsonb"`
-	CreatedAt       time.Time      `gorm:"column:created_at;not null;index:idx_agent_validations_session,sort:desc,priority:2"`
+	Scope           string         `gorm:"column:scope;size:40;not null;index:idx_agent_strategy_changes_scope_status,priority:1"`
+	Subject         string         `gorm:"column:subject;size:80;not null;index:idx_agent_strategy_changes_scope_status,priority:2"`
+	ParamName       string         `gorm:"column:param_name;size:80;not null"`
+	OldValue        float64        `gorm:"column:old_value;type:decimal(12,4);not null;default:0"`
+	NewValue        float64        `gorm:"column:new_value;type:decimal(12,4);not null;default:0"`
+	TargetMetric    string         `gorm:"column:target_metric;size:80;not null"`
+	BaselineValue   float64        `gorm:"column:baseline_value;type:decimal(12,4);not null;default:0"`
+	LatestValue     float64        `gorm:"column:latest_value;type:decimal(12,4);not null;default:0"`
+	ObservedRuns    int            `gorm:"column:observed_runs;not null;default:0"`
+	NoImproveStreak int            `gorm:"column:no_improve_streak;not null;default:0"`
+	Status          string         `gorm:"column:status;size:20;not null;default:monitoring;index:idx_agent_strategy_changes_scope_status,priority:3"`
+	Decision        string         `gorm:"column:decision;size:20"`
+	Reason          string         `gorm:"column:reason;type:text"`
+	MetaJSON        datatypes.JSON `gorm:"column:meta_json;type:jsonb"`
+	CreatedAt       time.Time      `gorm:"column:created_at;not null"`
+	UpdatedAt       time.Time      `gorm:"column:updated_at"`
+	FinalizedAt     *time.Time     `gorm:"column:finalized_at;index:idx_agent_strategy_changes_finalized"`
+}
+
+type AgentStrategyParam struct {
+	Key       string    `gorm:"column:key;size:80;primaryKey"`
+	Scope     string    `gorm:"column:scope;size:40;not null;default:agent_cycle;index:idx_agent_strategy_params_scope_enabled,priority:1"`
+	Value     float64   `gorm:"column:value;type:decimal(12,4);not null;default:0"`
+	Enabled   bool      `gorm:"column:enabled;not null;default:true;index:idx_agent_strategy_params_scope_enabled,priority:2"`
+	Reason    string    `gorm:"column:reason;type:text"`
+	CreatedAt time.Time `gorm:"column:created_at;not null"`
+	UpdatedAt time.Time `gorm:"column:updated_at"`
+}
+
+type OpportunityEvent struct {
+	ID          uint64         `gorm:"column:id;primaryKey;autoIncrement"`
+	EventType   string         `gorm:"column:event_type;size:40;not null;index:idx_opportunity_events_type_time,priority:1"`
+	MarketID    *string        `gorm:"column:market_id;type:uuid;index:idx_opportunity_events_market_time,priority:1"`
+	Severity    string         `gorm:"column:severity;size:16;not null;default:info"`
+	DedupKey    string         `gorm:"column:dedup_key;size:128;not null;index:idx_opportunity_events_dedup_time,priority:1"`
+	Payload     datatypes.JSON `gorm:"column:payload;type:jsonb"`
+	OccurredAt  time.Time      `gorm:"column:occurred_at;not null;index:idx_opportunity_events_type_time,sort:desc,priority:2;index:idx_opportunity_events_market_time,sort:desc,priority:2;index:idx_opportunity_events_dedup_time,sort:desc,priority:2"`
+	CreatedAt   time.Time      `gorm:"column:created_at;not null"`
+	ProcessedAt *time.Time     `gorm:"column:processed_at"`
+	Status      string         `gorm:"column:status;size:20;not null;default:pending;index:idx_opportunity_events_status_time,priority:1"`
+}
+
+type CandidateMarket struct {
+	MarketID          string         `gorm:"column:market_id;type:uuid;primaryKey"`
+	State             string         `gorm:"column:state;size:20;not null;default:cold;index:idx_candidate_markets_state_score,priority:1"`
+	Score             float64        `gorm:"column:score;type:decimal(10,4);not null;default:0;index:idx_candidate_markets_state_score,sort:desc,priority:2"`
+	TriggerCount24H   int            `gorm:"column:trigger_count_24h;not null;default:0"`
+	LastTriggerAt     *time.Time     `gorm:"column:last_trigger_at"`
+	LastStateChangeAt time.Time      `gorm:"column:last_state_change_at;not null"`
+	CooldownUntil     *time.Time     `gorm:"column:cooldown_until"`
+	Meta              datatypes.JSON `gorm:"column:meta;type:jsonb"`
+	UpdatedAt         time.Time      `gorm:"column:updated_at;not null;index:idx_candidate_markets_updated_at,sort:desc"`
+}
+
+type CandidateStateTransition struct {
+	ID          uint64    `gorm:"column:id;primaryKey;autoIncrement"`
+	MarketID    string    `gorm:"column:market_id;type:uuid;not null;index:idx_candidate_transitions_market_time,priority:1"`
+	FromState   string    `gorm:"column:from_state;size:20;not null"`
+	ToState     string    `gorm:"column:to_state;size:20;not null;index:idx_candidate_transitions_to_state_time,priority:1"`
+	EventType   string    `gorm:"column:event_type;size:40"`
+	Reason      string    `gorm:"column:reason;size:80"`
+	ScoreBefore float64   `gorm:"column:score_before;type:decimal(10,4);not null;default:0"`
+	ScoreAfter  float64   `gorm:"column:score_after;type:decimal(10,4);not null;default:0"`
+	OccurredAt  time.Time `gorm:"column:occurred_at;not null;index:idx_candidate_transitions_market_time,sort:desc,priority:2;index:idx_candidate_transitions_to_state_time,sort:desc,priority:2"`
+	CreatedAt   time.Time `gorm:"column:created_at;not null"`
+}
+
+type AgentEventCycle struct {
+	ID                 uint64     `gorm:"column:id;primaryKey;autoIncrement"`
+	CycleID            string     `gorm:"column:cycle_id;size:80;not null;uniqueIndex:idx_agent_event_cycles_cycle_id"`
+	RunMode            string     `gorm:"column:run_mode;size:30;not null"`
+	EventsConsumed     int        `gorm:"column:events_consumed;default:0"`
+	CandidatesSelected int        `gorm:"column:candidates_selected;default:0"`
+	SignalsGenerated   int        `gorm:"column:signals_generated;default:0"`
+	Decision           string     `gorm:"column:decision;size:20"`
+	Status             string     `gorm:"column:status;size:20;not null;default:running;index:idx_agent_event_cycles_status_time,priority:1"`
+	ErrorCode          string     `gorm:"column:error_code;size:64"`
+	ErrorMessage       string     `gorm:"column:error_message;type:text"`
+	FirstEventAt       *time.Time `gorm:"column:first_event_at"`
+	FirstSignalAt      *time.Time `gorm:"column:first_signal_at"`
+	StartedAt          time.Time  `gorm:"column:started_at;not null;index:idx_agent_event_cycles_started_at,sort:desc"`
+	FinishedAt         *time.Time `gorm:"column:finished_at"`
 }
 
 type SchedulerRun struct {

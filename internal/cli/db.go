@@ -39,6 +39,9 @@ func newDBMigrateCmd() *cobra.Command {
 			if err := database.AutoMigrate(db); err != nil {
 				return err
 			}
+			if err := database.EnsureDefaultActivePromptVersion(db); err != nil {
+				return err
+			}
 			fmt.Fprintln(cmd.OutOrStdout(), "auto-migrate applied")
 			return nil
 		},

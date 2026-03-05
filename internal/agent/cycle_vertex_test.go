@@ -34,3 +34,23 @@ func TestExtractJSONObject(t *testing.T) {
 		})
 	}
 }
+
+func TestRepairTruncatedJSON(t *testing.T) {
+	in := `{"decision":"call_tool","tool":"market.sync.batch","args":{"limit":10}`
+	got := repairTruncatedJSON(in)
+	want := `{"decision":"call_tool","tool":"market.sync.batch","args":{"limit":10}}`
+	if got != want {
+		t.Fatalf("repairTruncatedJSON()=%q want=%q", got, want)
+	}
+}
+
+func TestDecodeVertexJSON_WithTruncatedPayload(t *testing.T) {
+	raw := "```json\n{\"decision\":\"finish\",\"summary\":\"ok\"\n```"
+	var out cycleActionOutput
+	if err := decodeVertexJSON(raw, &out); err != nil {
+		t.Fatalf("decodeVertexJSON() unexpected err: %v", err)
+	}
+	if out.Decision != "finish" {
+		t.Fatalf("decision=%q want=finish", out.Decision)
+	}
+}

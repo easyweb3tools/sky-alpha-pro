@@ -121,8 +121,14 @@ Each market goes through a funnel:
 ```bash
 GET  /health                    # Health check
 GET  /ops/status                # Scheduler status
-GET  /ops/inspection            # Full system inspection (replaces manual SQL)
+GET  /ops/inspection            # Full system inspection (+alerts +immediate_actions +h48_actions +prompt rollout diagnostics)
 GET  /ops/agent/validations     # Agent cycle validation history
+GET  /ops/agent/prompt-performance  # Prompt version A/B performance stats
+GET  /ops/agent/strategy-changes    # Strategy change lifecycle (monitor/keep/rollback)
+GET  /ops/events/summary        # Opportunity event pipeline summary
+GET  /ops/candidates/summary    # Candidate pool summary
+GET  /ops/candidates/transitions # Candidate state transition audit
+POST /ops/events/emit           # Manual event injection (ops/debug)
 ```
 
 ### Markets
@@ -180,6 +186,10 @@ GET  /api/v1/players/leaderboard                  # ?type=weather&limit=20
 ```bash
 GET  /metrics                   # Prometheus metrics
 ```
+
+## Operations
+
+- API-first SRE inspection prompt: `docs/运维巡检Prompt.md`
 
 ## CLI Commands
 

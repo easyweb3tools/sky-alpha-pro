@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"hash/fnv"
 	"sort"
 	"strings"
 	"sync"
@@ -28,9 +29,12 @@ const (
 	defaultCyclePromptVersion       = "v1.0.0"
 	defaultCycleToolBudget          = 12
 	defaultCycleExternalReqBudget   = 200
+	defaultCycleTokenBudget         = 12000
+	defaultCycleDurationBudget      = 90 * time.Second
 	defaultCycleMemoryWindow        = 3
 	defaultCycleMarketLimit         = 300
 	defaultCycleAdvisoryLockKey     = int64(739001)
+	cyclePersistWriteTimeout        = 3 * time.Second
 	cycleStatusOK                   = "success"
 	cycleStatusDegraded             = "degraded"
 	cycleStatusError                = "error"
@@ -42,6 +46,15 @@ const (
 	issueCodePlanDecodeFailed       = "plan_decode_failed"
 	issueCodePlanValidationFailed   = "plan_validation_failed"
 	issueCodeAgentCycleNoExecutable = "agent_cycle_no_executable_step"
+	issueCodeTokenBudgetExhausted   = "token_budget_exhausted"
+	issueCodeCycleDurationExceeded  = "cycle_duration_exhausted"
+	issueCodeUpstream429            = "upstream_429"
+	strategyScopePromptRollout      = "prompt_rollout"
+	strategyScopeAgentParamTuning   = "agent_param_tuning"
+	strategySubjectAgentCycle       = "agent_cycle"
+	strategyParamMaxToolCalls       = "max_tool_calls"
+	strategyParamMaxExternalReqs    = "max_external_requests"
+	strategyParamMarketLimit        = "market_limit"
 )
 
 type cyclePromptInput struct {
@@ -59,6 +72,7 @@ type cyclePromptInput struct {
 type cyclePromptBudget struct {
 	MaxToolCalls        int `json:"max_tool_calls"`
 	MaxExternalRequests int `json:"max_external_requests"`
+	MaxTokensPerCycle   int `json:"max_tokens_per_cycle"`
 }
 
 type cyclePromptCoverage struct {
@@ -115,6 +129,7 @@ type cyclePlanStep struct {
 type cycleRiskControls struct {
 	MaxToolCalls        int  `json:"max_tool_calls"`
 	MaxExternalRequests int  `json:"max_external_requests"`
+	MaxTokensPerCycle   int  `json:"max_tokens_per_cycle"`
 	TradeEnabled        bool `json:"trade_enabled"`
 }
 
@@ -136,16 +151,18 @@ type cycleStepExecution struct {
 type cyclePromptBundle struct {
 	Version string
 	System  string
+	Variant string
 }
 
 func isVertexBrainMode(runMode string) bool {
 	mode := strings.ToLower(strings.TrimSpace(runMode))
-	return mode == "vertex_brain" || mode == "vertex-controlled" || mode == "vertex_controlled"
+	return mode == "vertex_brain" || mode == "vertex-controlled" || mode == "vertex_controlled" || mode == "event_driven"
 }
 
 func (s *Service) RunCycle(ctx context.Context, opts CycleOptions) (*CycleResult, error) {
 	started := time.Now().UTC()
 	options := normalizeCycleOptions(opts)
+	options = s.applyAgentCycleParamOverrides(ctx, options)
 	if options.CycleID == "" {
 		options.CycleID = fmt.Sprintf("cycle-%s", started.Format("20060102T150405Z"))
 	}
@@ -178,12 +195,12 @@ func (s *Service) RunCycle(ctx context.Context, opts CycleOptions) (*CycleResult
 	}
 	defer unlock()
 
-	promptBundle, err := s.loadPromptBundle(ctx)
+	promptBundle, err := s.loadPromptBundle(ctx, options.CycleID)
 	if err != nil {
 		if s.log != nil {
 			s.log.Warn("load prompt bundle failed; fallback to built-in prompt", zap.Error(err))
 		}
-		promptBundle = cyclePromptBundle{Version: defaultCyclePromptVersion, System: cycleSystemPrompt}
+		promptBundle = cyclePromptBundle{Version: defaultCyclePromptVersion, System: cycleSystemPrompt, Variant: "builtin"}
 	}
 
 	input, err := s.buildCyclePromptInput(ctx, options)
@@ -204,21 +221,48 @@ func (s *Service) RunCycle(ctx context.Context, opts CycleOptions) (*CycleResult
 		Errors:    make([]CycleIssue, 0, 8),
 		Warnings:  make([]CycleIssue, 0, 8),
 		Freshness: make(map[string]float64),
+		BrainTrace: []CycleStateEvent{
+			{State: "cycle_started", At: started, Message: "vertex brain cycle started"},
+		},
 		StartedAt: started,
 	}
+	deadline := started.Add(time.Duration(options.MaxCycleDurationSec) * time.Second)
 
 	plan := cyclePlanOutput{}
 	fallbackReason := ""
 	if isVertexBrainMode(options.RunMode) && s.vertexAI != nil {
 		result.Decision = "run"
 		result.Model = s.vertexAI.ModelName()
-		history := make([]map[string]any, 0, options.MaxToolCalls)
+		conversation := buildVertexConversationInit(input, options.MaxToolCalls)
 		funnel := map[string]any{}
 		var reportID uint64
 		executedSteps := make([]cyclePlanStep, 0, options.MaxToolCalls+2)
 		externalUsed := 0
 		stepNo := 1
+		malformedRetryUsed := false
+		result.BrainTrace = append(result.BrainTrace, CycleStateEvent{
+			State:   "vertex_session_started",
+			At:      time.Now().UTC(),
+			Message: "vertex-controlled loop entered",
+		})
 		for stepNo <= options.MaxToolCalls {
+			if time.Now().UTC().After(deadline) {
+				result.Warnings = append(result.Warnings, CycleIssue{
+					Code:    issueCodeCycleDurationExceeded,
+					Message: "max cycle duration budget reached",
+					Source:  "agent_cycle",
+					Count:   1,
+				})
+				result.Status = cycleStatusDegraded
+				result.SkipReason = "max cycle duration reached"
+				result.BrainTrace = append(result.BrainTrace, CycleStateEvent{
+					State:     "cycle_stopped",
+					At:        time.Now().UTC(),
+					Message:   "max cycle duration budget reached",
+					ErrorCode: issueCodeCycleDurationExceeded,
+				})
+				break
+			}
 			if externalUsed >= options.MaxExternalRequests {
 				result.Warnings = append(result.Warnings, CycleIssue{
 					Code:    "external_budget_exhausted",
@@ -227,22 +271,102 @@ func (s *Service) RunCycle(ctx context.Context, opts CycleOptions) (*CycleResult
 					Count:   1,
 				})
 				result.Status = cycleStatusDegraded
+				result.BrainTrace = append(result.BrainTrace, CycleStateEvent{
+					State:     "cycle_stopped",
+					At:        time.Now().UTC(),
+					Message:   "max external request budget reached",
+					ErrorCode: "external_budget_exhausted",
+				})
 				break
 			}
-			result.LLMCalls++
-			action, actionErr := s.vertexAI.NextCycleAction(ctx, input, history, stepNo, options.MaxToolCalls)
-			if actionErr != nil {
+			if result.LLMTokens >= options.MaxTokensPerCycle {
 				result.Warnings = append(result.Warnings, CycleIssue{
-					Code:    issueCodePlanDecodeFailed,
+					Code:    issueCodeTokenBudgetExhausted,
+					Message: "max llm token budget reached",
+					Source:  "agent_cycle",
+					Count:   1,
+				})
+				result.Status = cycleStatusDegraded
+				result.SkipReason = "max llm token budget reached"
+				result.BrainTrace = append(result.BrainTrace, CycleStateEvent{
+					State:     "cycle_stopped",
+					At:        time.Now().UTC(),
+					Message:   "max llm token budget reached",
+					ErrorCode: issueCodeTokenBudgetExhausted,
+				})
+				break
+			}
+			result.BrainTrace = append(result.BrainTrace, CycleStateEvent{
+				State:   "vertex_next_action",
+				At:      time.Now().UTC(),
+				StepNo:  stepNo,
+				Message: "requesting next action from vertex",
+			})
+			result.LLMCalls++
+			action, tokensUsed, actionErr := s.vertexAI.NextCycleAction(ctx, stepNo, options.MaxToolCalls, conversation)
+			result.LLMTokens += tokensUsed
+			if actionErr != nil {
+				code := classifyVertexActionErr(actionErr)
+				result.Warnings = append(result.Warnings, CycleIssue{
+					Code:    code,
 					Message: actionErr.Error(),
 					Source:  "vertex_ai",
 					Count:   1,
 				})
 				result.Status = cycleStatusDegraded
 				fallbackReason = "vertex_next_action_failed"
+				result.BrainTrace = append(result.BrainTrace, CycleStateEvent{
+					State:     "vertex_next_action_failed",
+					At:        time.Now().UTC(),
+					StepNo:    stepNo,
+					Message:   actionErr.Error(),
+					ErrorCode: code,
+				})
+				break
+			}
+			if result.LLMTokens > options.MaxTokensPerCycle {
+				result.Warnings = append(result.Warnings, CycleIssue{
+					Code:    issueCodeTokenBudgetExhausted,
+					Message: "llm token budget exceeded after vertex action",
+					Source:  "vertex_ai",
+					Count:   1,
+				})
+				result.Status = cycleStatusDegraded
+				result.SkipReason = "max llm token budget reached"
+				result.BrainTrace = append(result.BrainTrace, CycleStateEvent{
+					State:     "cycle_stopped",
+					At:        time.Now().UTC(),
+					StepNo:    stepNo,
+					Message:   "llm token budget exceeded after vertex action",
+					ErrorCode: issueCodeTokenBudgetExhausted,
+				})
 				break
 			}
 			if action.Decision == "finish" {
+				if isMalformedFunctionCallSummary(action.Summary) && !malformedRetryUsed {
+					malformedRetryUsed = true
+					result.BrainTrace = append(result.BrainTrace, CycleStateEvent{
+						State:   "vertex_malformed_retry",
+						At:      time.Now().UTC(),
+						StepNo:  stepNo,
+						Message: "malformed function call detected; retrying once with stricter instruction",
+					})
+					conversation = append(conversation, map[string]any{
+						"role": "user",
+						"parts": []map[string]any{
+							{
+								"text": "Your previous function call was malformed. Do NOT output code, print(), or prose. Call exactly one allowed function now: call_tool(...) OR finish_cycle(...).",
+							},
+						},
+					})
+					continue
+				}
+				result.BrainTrace = append(result.BrainTrace, CycleStateEvent{
+					State:   "vertex_finish",
+					At:      time.Now().UTC(),
+					StepNo:  stepNo,
+					Message: strings.TrimSpace(action.Summary),
+				})
 				break
 			}
 			if action.Decision != "call_tool" || strings.TrimSpace(action.Tool) == "" {
@@ -253,6 +377,13 @@ func (s *Service) RunCycle(ctx context.Context, opts CycleOptions) (*CycleResult
 					Count:   1,
 				})
 				result.Status = cycleStatusDegraded
+				result.BrainTrace = append(result.BrainTrace, CycleStateEvent{
+					State:     "vertex_next_action_invalid",
+					At:        time.Now().UTC(),
+					StepNo:    stepNo,
+					Message:   "vertex action invalid decision/tool",
+					ErrorCode: issueCodePlanValidationFailed,
+				})
 				break
 			}
 
@@ -270,6 +401,30 @@ func (s *Service) RunCycle(ctx context.Context, opts CycleOptions) (*CycleResult
 				step.Args = map[string]any{}
 			}
 			executedSteps = append(executedSteps, step)
+			conversation = append(conversation, map[string]any{
+				"role": "model",
+				"parts": []map[string]any{
+					{
+						"functionCall": map[string]any{
+							"name": "call_tool",
+							"args": map[string]any{
+								"tool":    step.Tool,
+								"args":    step.Args,
+								"why":     step.Why,
+								"on_fail": step.OnFail,
+								"summary": strings.TrimSpace(action.Summary),
+							},
+						},
+					},
+				},
+			})
+			result.BrainTrace = append(result.BrainTrace, CycleStateEvent{
+				State:   "tool_call_started",
+				At:      time.Now().UTC(),
+				StepNo:  stepNo,
+				Tool:    step.Tool,
+				Message: strings.TrimSpace(step.Why),
+			})
 
 			exec, stepErr := s.executePlanStep(ctx, step, options, result, funnel)
 			result.ToolCalls++
@@ -299,25 +454,58 @@ func (s *Service) RunCycle(ctx context.Context, opts CycleOptions) (*CycleResult
 			}
 			now := time.Now().UTC()
 			s.persistCycleStep(ctx, result.SessionID, step, exec, stepErr, now, now)
+			traceMsg := "tool call finished"
+			errCode := ""
+			if stepErr != nil {
+				traceMsg = stepErr.Error()
+				errCode = firstIssueCode(exec.Errors)
+			}
+			result.BrainTrace = append(result.BrainTrace, CycleStateEvent{
+				State:     "tool_call_finished",
+				At:        now,
+				StepNo:    stepNo,
+				Tool:      step.Tool,
+				Message:   traceMsg,
+				ErrorCode: errCode,
+			})
 
-			history = append(history, map[string]any{
-				"step":     stepNo,
-				"tool":     step.Tool,
-				"status":   exec.Status,
-				"on_fail":  step.OnFail,
-				"errors":   exec.Errors,
-				"warnings": exec.Warnings,
-				"records":  exec.Records,
-				"summary":  action.Summary,
-				"step_error": func() string {
-					if stepErr == nil {
-						return ""
-					}
-					return stepErr.Error()
-				}(),
+			conversation = append(conversation, map[string]any{
+				"role": "user",
+				"parts": []map[string]any{
+					{
+						"functionResponse": map[string]any{
+							"name": "call_tool",
+							"response": map[string]any{
+								"step":        stepNo,
+								"tool":        step.Tool,
+								"status":      exec.Status,
+								"on_fail":     step.OnFail,
+								"records":     exec.Records,
+								"errors":      exec.Errors,
+								"warnings":    exec.Warnings,
+								"external":    exec.ExternalRequests,
+								"step_error":  errorString(stepErr),
+								"signal_funnel": func() map[string]any {
+									if sf, ok := exec.Meta["signal_funnel"].(map[string]any); ok {
+										return sf
+									}
+									return nil
+								}(),
+							},
+						},
+					},
+				},
 			})
 			if stepErr != nil && strings.EqualFold(step.OnFail, "abort") {
 				result.Status = cycleStatusError
+				result.BrainTrace = append(result.BrainTrace, CycleStateEvent{
+					State:     "cycle_aborted",
+					At:        time.Now().UTC(),
+					StepNo:    stepNo,
+					Tool:      step.Tool,
+					Message:   stepErr.Error(),
+					ErrorCode: "step_aborted",
+				})
 				break
 			}
 			if stepErr != nil && result.Status == cycleStatusOK {
@@ -327,6 +515,9 @@ func (s *Service) RunCycle(ctx context.Context, opts CycleOptions) (*CycleResult
 		}
 
 		ensureStep := func(tool, why string) {
+			if time.Now().UTC().After(deadline) {
+				return
+			}
 			for _, st := range executedSteps {
 				if strings.EqualFold(st.Tool, tool) {
 					return
@@ -340,6 +531,13 @@ func (s *Service) RunCycle(ctx context.Context, opts CycleOptions) (*CycleResult
 				OnFail: "continue",
 			}
 			executedSteps = append(executedSteps, step)
+			result.BrainTrace = append(result.BrainTrace, CycleStateEvent{
+				State:   "tool_call_started",
+				At:      time.Now().UTC(),
+				StepNo:  step.Step,
+				Tool:    step.Tool,
+				Message: why,
+			})
 			exec, stepErr := s.executePlanStep(ctx, step, options, result, funnel)
 			result.ToolCalls++
 			result.Records = append(result.Records, exec.Records...)
@@ -353,6 +551,20 @@ func (s *Service) RunCycle(ctx context.Context, opts CycleOptions) (*CycleResult
 			}
 			now := time.Now().UTC()
 			s.persistCycleStep(ctx, result.SessionID, step, exec, stepErr, now, now)
+			traceMsg := "tool call finished"
+			errCode := ""
+			if stepErr != nil {
+				traceMsg = stepErr.Error()
+				errCode = firstIssueCode(exec.Errors)
+			}
+			result.BrainTrace = append(result.BrainTrace, CycleStateEvent{
+				State:     "tool_call_finished",
+				At:        now,
+				StepNo:    step.Step,
+				Tool:      step.Tool,
+				Message:   traceMsg,
+				ErrorCode: errCode,
+			})
 		}
 		ensureStep("report.generate", "persist cycle summary for ops and memory")
 		ensureStep("report.validate.write", "validate cycle value and write structured verdict")
@@ -371,10 +583,16 @@ func (s *Service) RunCycle(ctx context.Context, opts CycleOptions) (*CycleResult
 			result.Status = cycleStatusDegraded
 		}
 		result.FinishedAt = time.Now().UTC()
+		result.BrainTrace = append(result.BrainTrace, CycleStateEvent{
+			State:   "cycle_finished",
+			At:      result.FinishedAt,
+			Message: "vertex brain cycle finished",
+		})
 		result.DurationMS = result.FinishedAt.Sub(result.StartedAt).Milliseconds()
-		s.persistCycleSession(ctx, result, input, promptBundle.Version, plan, funnel)
+		s.persistCycleSession(ctx, result, input, promptBundle, plan, funnel)
 		s.persistCycleMemory(ctx, result, plan, funnel)
 		s.finalizeCycleReport(ctx, reportID, result, funnel)
+		s.evaluateStrategyEvolution(promptBundle, options, result, funnel)
 		s.observeCycleMetrics(result, fallbackReason)
 		return result, nil
 	}
@@ -400,10 +618,7 @@ func (s *Service) RunCycle(ctx context.Context, opts CycleOptions) (*CycleResult
 			fallbackReason = "plan_validation_failed"
 		}
 	}
-	result.Decision = strings.TrimSpace(plan.Decision)
-	if result.Decision == "" {
-		result.Decision = "run"
-	}
+	result.Decision = normalizeCycleDecision(plan.Decision)
 	result.Model = modelName
 
 	if len(plan.Plan) == 0 {
@@ -421,6 +636,17 @@ func (s *Service) RunCycle(ctx context.Context, opts CycleOptions) (*CycleResult
 	funnel := map[string]any{}
 	var reportID uint64
 	for _, step := range sortPlanSteps(plan.Plan) {
+		if time.Now().UTC().After(deadline) {
+			result.Warnings = append(result.Warnings, CycleIssue{
+				Code:    issueCodeCycleDurationExceeded,
+				Message: "max cycle duration budget reached",
+				Source:  "agent_cycle",
+				Count:   1,
+			})
+			result.Status = cycleStatusDegraded
+			result.SkipReason = "max cycle duration reached"
+			break
+		}
 		if result.ToolCalls >= options.MaxToolCalls {
 			result.Warnings = append(result.Warnings, CycleIssue{
 				Code:    "tool_budget_exhausted",
@@ -520,9 +746,10 @@ func (s *Service) RunCycle(ctx context.Context, opts CycleOptions) (*CycleResult
 	result.FinishedAt = time.Now().UTC()
 	result.DurationMS = result.FinishedAt.Sub(result.StartedAt).Milliseconds()
 
-	s.persistCycleSession(ctx, result, input, promptBundle.Version, plan, funnel)
+	s.persistCycleSession(ctx, result, input, promptBundle, plan, funnel)
 	s.persistCycleMemory(ctx, result, plan, funnel)
 	s.finalizeCycleReport(ctx, reportID, result, funnel)
+	s.evaluateStrategyEvolution(promptBundle, options, result, funnel)
 	s.observeCycleMetrics(result, fallbackReason)
 	return result, nil
 }
@@ -538,6 +765,12 @@ func normalizeCycleOptions(opts CycleOptions) CycleOptions {
 	}
 	if out.MaxExternalRequests <= 0 {
 		out.MaxExternalRequests = defaultCycleExternalReqBudget
+	}
+	if out.MaxTokensPerCycle <= 0 {
+		out.MaxTokensPerCycle = defaultCycleTokenBudget
+	}
+	if out.MaxCycleDurationSec <= 0 {
+		out.MaxCycleDurationSec = int(defaultCycleDurationBudget.Seconds())
 	}
 	if out.MemoryWindow <= 0 {
 		out.MemoryWindow = defaultCycleMemoryWindow
@@ -598,6 +831,7 @@ func (s *Service) buildCyclePromptInput(ctx context.Context, opts CycleOptions) 
 		Budgets: cyclePromptBudget{
 			MaxToolCalls:        opts.MaxToolCalls,
 			MaxExternalRequests: opts.MaxExternalRequests,
+			MaxTokensPerCycle:   opts.MaxTokensPerCycle,
 		},
 		Coverage: cyclePromptCoverage{
 			ActiveMarkets:      activeMarkets,
@@ -623,7 +857,8 @@ func (s *Service) buildPlan(ctx context.Context, input cyclePromptInput, systemP
 		return s.buildFallbackPlan(input), modelName, "vertex_unavailable"
 	}
 	result.LLMCalls++
-	plan, err := s.vertexAI.PlanCycle(ctx, input, systemPrompt)
+	plan, tokenUsed, err := s.vertexAI.PlanCycle(ctx, input, systemPrompt)
+	result.LLMTokens += tokenUsed
 	if err != nil {
 		result.Warnings = append(result.Warnings, CycleIssue{
 			Code:    issueCodePlanDecodeFailed,
@@ -726,6 +961,7 @@ func (s *Service) buildFallbackPlan(input cyclePromptInput) cyclePlanOutput {
 		RiskControls: cycleRiskControls{
 			MaxToolCalls:        input.Budgets.MaxToolCalls,
 			MaxExternalRequests: input.Budgets.MaxExternalRequests,
+			MaxTokensPerCycle:   input.Budgets.MaxTokensPerCycle,
 			TradeEnabled:        input.TradeEnabled,
 		},
 		ExpectedOutput: []string{"scheduler_runs", "signal_runs", "signals"},
@@ -787,6 +1023,48 @@ func appendMandatoryStep(plan cyclePlanOutput, step cyclePlanStep) cyclePlanOutp
 	}
 	plan.Plan = append(plan.Plan, step)
 	return plan
+}
+
+func buildVertexConversationInit(input cyclePromptInput, maxSteps int) []map[string]any {
+	b, _ := json.Marshal(map[string]any{
+		"step":      1,
+		"max_steps": maxSteps,
+		"context":   input,
+		"history":   []any{},
+	})
+	return []map[string]any{
+		{
+			"role": "user",
+			"parts": []map[string]any{
+				{"text": "Cycle control input JSON:\n" + string(b)},
+			},
+		},
+	}
+}
+
+func errorString(err error) string {
+	if err == nil {
+		return ""
+	}
+	return err.Error()
+}
+
+func isMalformedFunctionCallSummary(summary string) bool {
+	msg := strings.ToLower(strings.TrimSpace(summary))
+	return strings.Contains(msg, "malformed function call")
+}
+
+func classifyVertexActionErr(err error) string {
+	if err == nil {
+		return issueCodePlanDecodeFailed
+	}
+	msg := strings.ToLower(err.Error())
+	if strings.Contains(msg, "status=429") ||
+		strings.Contains(msg, "resource_exhausted") ||
+		strings.Contains(msg, "too many requests") {
+		return issueCodeUpstream429
+	}
+	return issueCodePlanDecodeFailed
 }
 
 func (s *Service) executePlanStep(ctx context.Context, step cyclePlanStep, opts CycleOptions, result *CycleResult, funnel map[string]any) (cycleStepExecution, error) {
@@ -1098,6 +1376,7 @@ func (s *Service) runToolReportGenerate(ctx context.Context, result *CycleResult
 		"decision":    result.Decision,
 		"status":      result.Status,
 		"llm_calls":   result.LLMCalls,
+		"llm_tokens":  result.LLMTokens,
 		"tool_calls":  result.ToolCalls,
 		"records":     result.Records,
 		"errors":      result.Errors,
@@ -1120,7 +1399,9 @@ func (s *Service) runToolReportGenerate(ctx context.Context, result *CycleResult
 		CreatedAt:   time.Now().UTC(),
 		UpdatedAt:   time.Now().UTC(),
 	}
-	if err := s.db.WithContext(ctx).Create(&row).Error; err != nil {
+	writeCtx, cancel := detachedWriteContext()
+	defer cancel()
+	if err := s.db.WithContext(writeCtx).Create(&row).Error; err != nil {
 		return cycleStepExecution{
 			Status: "error",
 			Errors: []CycleIssue{{
@@ -1166,6 +1447,7 @@ func (s *Service) finalizeCycleReport(ctx context.Context, reportID uint64, resu
 		"status":      result.Status,
 		"skip_reason": result.SkipReason,
 		"llm_calls":   result.LLMCalls,
+		"llm_tokens":  result.LLMTokens,
 		"tool_calls":  result.ToolCalls,
 		"records":     result.Records,
 		"errors":      result.Errors,
@@ -1176,7 +1458,9 @@ func (s *Service) finalizeCycleReport(ctx context.Context, reportID uint64, resu
 		"duration_ms": result.DurationMS,
 	})
 	funnelJSON, _ := json.Marshal(funnel)
-	if err := s.db.WithContext(ctx).
+	writeCtx, cancel := detachedWriteContext()
+	defer cancel()
+	if err := s.db.WithContext(writeCtx).
 		Model(&model.AgentReport{}).
 		Where("id = ?", reportID).
 		Updates(map[string]any{
@@ -1257,7 +1541,9 @@ func (s *Service) persistValidationReport(ctx context.Context, result *CycleResu
 		OutputJSON:     datatypes.JSON(outJSON),
 		CreatedAt:      time.Now().UTC(),
 	}
-	if err := s.db.WithContext(ctx).Create(&row).Error; err != nil {
+	writeCtx, cancel := detachedWriteContext()
+	defer cancel()
+	if err := s.db.WithContext(writeCtx).Create(&row).Error; err != nil {
 		return 0, err
 	}
 	return row.ID, nil
@@ -1355,7 +1641,7 @@ func extractFunnelInt(funnel map[string]any, key string) int {
 	}
 }
 
-func (s *Service) persistCycleSession(ctx context.Context, result *CycleResult, input cyclePromptInput, promptVersion string, plan cyclePlanOutput, funnel map[string]any) {
+func (s *Service) persistCycleSession(ctx context.Context, result *CycleResult, input cyclePromptInput, promptBundle cyclePromptBundle, plan cyclePlanOutput, funnel map[string]any) {
 	if s.db == nil || result == nil {
 		return
 	}
@@ -1363,19 +1649,27 @@ func (s *Service) persistCycleSession(ctx context.Context, result *CycleResult, 
 	inputJSON, _ := json.Marshal(input)
 	planJSON, _ := json.Marshal(plan)
 	summaryJSON, _ := json.Marshal(map[string]any{
-		"funnel":   funnel,
-		"errors":   result.Errors,
-		"warnings": result.Warnings,
+		"funnel":         funnel,
+		"errors":         result.Errors,
+		"warnings":       result.Warnings,
+		"brain_trace":    result.BrainTrace,
+		"no_op_reason":   result.SkipReason,
+		"llm_calls":      result.LLMCalls,
+		"llm_tokens":     result.LLMTokens,
+		"cycle_status":   result.Status,
+		"cycle_decision": result.Decision,
 	})
 	row := model.AgentSession{
 		ID:               result.SessionID,
 		CycleID:          result.CycleID,
-		PromptVersion:    promptVersion,
+		PromptVersion:    promptBundle.Version,
+		PromptVariant:    promptBundle.Variant,
 		RunMode:          result.RunMode,
 		Model:            result.Model,
 		Status:           result.Status,
 		Decision:         result.Decision,
 		LLMCalls:         result.LLMCalls,
+		LLMTokens:        result.LLMTokens,
 		ToolCalls:        result.ToolCalls,
 		RecordsSuccess:   recordsSuccess,
 		RecordsError:     recordsError,
@@ -1391,7 +1685,9 @@ func (s *Service) persistCycleSession(ctx context.Context, result *CycleResult, 
 		CreatedAt:        time.Now().UTC(),
 		UpdatedAt:        time.Now().UTC(),
 	}
-	if err := s.db.WithContext(ctx).Create(&row).Error; err != nil && s.log != nil {
+	writeCtx, cancel := detachedWriteContext()
+	defer cancel()
+	if err := s.db.WithContext(writeCtx).Create(&row).Error; err != nil && s.log != nil {
 		s.log.Warn("persist agent session failed", zap.Error(err), zap.String("session_id", result.SessionID))
 	}
 }
@@ -1433,7 +1729,9 @@ func (s *Service) persistCycleStep(ctx context.Context, sessionID string, step c
 	if stepErr != nil {
 		row.ErrorDetail = stepErr.Error()
 	}
-	if err := s.db.WithContext(ctx).Create(&row).Error; err != nil && s.log != nil {
+	writeCtx, cancel := detachedWriteContext()
+	defer cancel()
+	if err := s.db.WithContext(writeCtx).Create(&row).Error; err != nil && s.log != nil {
 		s.log.Warn("persist agent step failed", zap.Error(err), zap.String("session_id", sessionID), zap.String("tool", step.Tool))
 	}
 }
@@ -1460,6 +1758,7 @@ func (s *Service) persistCycleMemory(ctx context.Context, result *CycleResult, p
 		"decision":    result.Decision,
 		"tool_calls":  result.ToolCalls,
 		"llm_calls":   result.LLMCalls,
+		"llm_tokens":  result.LLMTokens,
 		"records":     result.Records,
 		"errors":      result.Errors,
 		"warnings":    result.Warnings,
@@ -1477,9 +1776,15 @@ func (s *Service) persistCycleMemory(ctx context.Context, result *CycleResult, p
 		ExecutionJSON:  datatypes.JSON(execJSON),
 		CreatedAt:      time.Now().UTC(),
 	}
-	if err := s.db.WithContext(ctx).Create(&row).Error; err != nil && s.log != nil {
+	writeCtx, cancel := detachedWriteContext()
+	defer cancel()
+	if err := s.db.WithContext(writeCtx).Create(&row).Error; err != nil && s.log != nil {
 		s.log.Warn("persist agent memory failed", zap.Error(err), zap.String("session_id", result.SessionID))
 	}
+}
+
+func detachedWriteContext() (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.Background(), cyclePersistWriteTimeout)
 }
 
 func (s *Service) loadRecentMemories(ctx context.Context, window int) ([]cyclePromptMemoryBrief, error) {
@@ -1505,10 +1810,11 @@ func (s *Service) loadRecentMemories(ctx context.Context, window int) ([]cyclePr
 	return out, nil
 }
 
-func (s *Service) loadPromptBundle(ctx context.Context) (cyclePromptBundle, error) {
+func (s *Service) loadPromptBundle(ctx context.Context, cycleID string) (cyclePromptBundle, error) {
 	bundle := cyclePromptBundle{
 		Version: defaultCyclePromptVersion,
 		System:  cycleSystemPrompt,
+		Variant: "builtin",
 	}
 	if s.db == nil {
 		return bundle, nil
@@ -1537,7 +1843,519 @@ func (s *Service) loadPromptBundle(ctx context.Context) (cyclePromptBundle, erro
 	if len(system) >= 32 {
 		bundle.System = system
 	}
+	bundle.Variant = "active"
+
+	// Candidate prompt gray rollout: if candidate exists and hash hits rollout bucket,
+	// use candidate this cycle; otherwise keep active.
+	var candidate model.PromptVersion
+	candidateErr := s.db.WithContext(ctx).
+		Where("COALESCE(stage, '') = ? AND COALESCE(rollout_pct, 0) > 0", "candidate").
+		Order("updated_at DESC, id DESC").
+		Limit(1).
+		Take(&candidate).Error
+	if candidateErr != nil && !errors.Is(candidateErr, gorm.ErrRecordNotFound) {
+		msg := strings.ToLower(candidateErr.Error())
+		if !strings.Contains(msg, "no such table") && !strings.Contains(msg, "does not exist") {
+			return bundle, candidateErr
+		}
+		return bundle, nil
+	}
+	if candidateErr == nil && shouldUseCandidatePrompt(cycleID, candidate.RolloutPct) {
+		cVersion := strings.TrimSpace(candidate.Version)
+		cSystem := strings.TrimSpace(candidate.SystemPrompt)
+		if cVersion != "" && len(cSystem) >= 32 {
+			bundle.Version = cVersion
+			bundle.System = cSystem
+			bundle.Variant = "candidate"
+		}
+	}
 	return bundle, nil
+}
+
+func shouldUseCandidatePrompt(cycleID string, rolloutPct float64) bool {
+	if rolloutPct <= 0 {
+		return false
+	}
+	if rolloutPct >= 100 {
+		return true
+	}
+	key := strings.TrimSpace(cycleID)
+	if key == "" {
+		key = time.Now().UTC().Format("20060102150405")
+	}
+	h := fnv.New32a()
+	_, _ = h.Write([]byte(key))
+	bucket := float64(h.Sum32()%10000) / 100.0 // 0.00 ~ 99.99
+	return bucket < rolloutPct
+}
+
+type paramTuningSnapshot struct {
+	SignalsGenerated int
+	SpecReady        int
+	ForecastReady    int
+	ErrorRate        float64
+	Had429           bool
+}
+
+type paramAdjustmentProposal struct {
+	Param        string
+	TargetMetric string
+	Reason       string
+	OldValue     float64
+	NewValue     float64
+}
+
+func (s *Service) evaluateAgentParamTuning(options CycleOptions, result *CycleResult, funnel map[string]any) {
+	if s == nil || s.db == nil || result == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	snapshot := buildParamTuningSnapshot(result, funnel)
+	if err := s.reconcileMonitoringParamChanges(ctx, snapshot); err != nil && s.log != nil {
+		s.log.Warn("reconcile param tuning failed", zap.Error(err))
+	}
+
+	proposals := s.buildParamAdjustmentProposals(options, snapshot)
+	if len(proposals) == 0 {
+		return
+	}
+	applied := 0
+	for _, proposal := range proposals {
+		if applied >= 2 {
+			break
+		}
+		hasMonitoring, err := s.hasMonitoringParamChange(ctx, proposal.Param)
+		if err != nil {
+			if s.log != nil {
+				s.log.Warn("check param monitoring status failed", zap.Error(err), zap.String("param", proposal.Param))
+			}
+			continue
+		}
+		if hasMonitoring {
+			continue
+		}
+		if err := s.applyParamAdjustmentProposal(ctx, proposal, snapshot); err != nil {
+			if s.log != nil {
+				s.log.Warn("apply param proposal failed", zap.Error(err), zap.String("param", proposal.Param))
+			}
+			continue
+		}
+		applied++
+	}
+}
+
+func buildParamTuningSnapshot(result *CycleResult, funnel map[string]any) paramTuningSnapshot {
+	s := paramTuningSnapshot{
+		SignalsGenerated: extractFunnelInt(funnel, "signals_generated"),
+		SpecReady:        extractFunnelInt(funnel, "spec_ready"),
+		ForecastReady:    extractFunnelInt(funnel, "forecast_ready"),
+	}
+	if result != nil {
+		if result.Status == cycleStatusError || result.Status == cycleStatusDegraded || len(result.Errors) > 0 {
+			s.ErrorRate = 1
+		}
+		for _, issue := range append(append([]CycleIssue{}, result.Errors...), result.Warnings...) {
+			msg := strings.ToLower(strings.TrimSpace(issue.Message))
+			code := strings.ToLower(strings.TrimSpace(issue.Code))
+			if strings.Contains(code, "429") || strings.Contains(msg, "429") || strings.Contains(msg, "rate limit") {
+				s.Had429 = true
+				break
+			}
+		}
+	}
+	return s
+}
+
+func (s *Service) buildParamAdjustmentProposals(options CycleOptions, snap paramTuningSnapshot) []paramAdjustmentProposal {
+	proposals := make([]paramAdjustmentProposal, 0, 2)
+	adjusted := s.enforceAgentParamConstraints(options)
+	if snap.Had429 {
+		newExternal := clampFloat(float64(adjusted.MaxExternalRequests)*0.8, 20, 400)
+		newToolCalls := clampFloat(float64(adjusted.MaxToolCalls)-1, 4, 24)
+		newOpts := adjusted
+		newOpts.MaxExternalRequests = int(newExternal)
+		newOpts.MaxToolCalls = int(newToolCalls)
+		newOpts = s.enforceAgentParamConstraints(newOpts)
+		if newOpts.MaxExternalRequests != adjusted.MaxExternalRequests {
+			proposals = append(proposals, paramAdjustmentProposal{
+				Param:        strategyParamMaxExternalReqs,
+				TargetMetric: "error_rate",
+				Reason:       "rpc/upstream 429 observed; reduce request pressure",
+				OldValue:     float64(adjusted.MaxExternalRequests),
+				NewValue:     float64(newOpts.MaxExternalRequests),
+			})
+		}
+		if len(proposals) < 2 && newOpts.MaxToolCalls != adjusted.MaxToolCalls {
+			proposals = append(proposals, paramAdjustmentProposal{
+				Param:        strategyParamMaxToolCalls,
+				TargetMetric: "error_rate",
+				Reason:       "429 pressure protection; lower tool fan-out",
+				OldValue:     float64(adjusted.MaxToolCalls),
+				NewValue:     float64(newOpts.MaxToolCalls),
+			})
+		}
+		return proposals
+	}
+	if snap.SignalsGenerated == 0 && snap.SpecReady > 0 && snap.ForecastReady > 0 {
+		newOpts := adjusted
+		newOpts.MarketLimit = int(clampFloat(float64(adjusted.MarketLimit)+50, 50, 500))
+		newOpts.MaxExternalRequests = int(clampFloat(float64(adjusted.MaxExternalRequests)+20, 20, 400))
+		newOpts = s.enforceAgentParamConstraints(newOpts)
+		if newOpts.MarketLimit != adjusted.MarketLimit {
+			proposals = append(proposals, paramAdjustmentProposal{
+				Param:        strategyParamMarketLimit,
+				TargetMetric: "signals_per_run",
+				Reason:       "funnel ready but no signals; broaden candidate search",
+				OldValue:     float64(adjusted.MarketLimit),
+				NewValue:     float64(newOpts.MarketLimit),
+			})
+		}
+		if len(proposals) < 2 && newOpts.MaxExternalRequests != adjusted.MaxExternalRequests {
+			proposals = append(proposals, paramAdjustmentProposal{
+				Param:        strategyParamMaxExternalReqs,
+				TargetMetric: "signals_per_run",
+				Reason:       "support wider candidate scan for signal discovery",
+				OldValue:     float64(adjusted.MaxExternalRequests),
+				NewValue:     float64(newOpts.MaxExternalRequests),
+			})
+		}
+	}
+	return proposals
+}
+
+func (s *Service) reconcileMonitoringParamChanges(ctx context.Context, snap paramTuningSnapshot) error {
+	var changes []model.AgentStrategyChange
+	if err := s.db.WithContext(ctx).
+		Where("scope = ? AND subject = ? AND status = ?", strategyScopeAgentParamTuning, strategySubjectAgentCycle, "monitoring").
+		Order("updated_at ASC, id ASC").
+		Find(&changes).Error; err != nil {
+		msg := strings.ToLower(err.Error())
+		if strings.Contains(msg, "no such table") || strings.Contains(msg, "does not exist") {
+			return nil
+		}
+		return err
+	}
+	if len(changes) == 0 {
+		return nil
+	}
+	now := time.Now().UTC()
+	for i := range changes {
+		change := &changes[i]
+		latest := tuningObservedMetric(change.TargetMetric, snap)
+		improved := isTuningMetricImproved(change.TargetMetric, change.BaselineValue, latest)
+		change.ObservedRuns++
+		change.LatestValue = latest
+		if improved {
+			change.NoImproveStreak = 0
+		} else {
+			change.NoImproveStreak++
+		}
+		change.UpdatedAt = now
+		if change.NoImproveStreak >= 3 {
+			if err := s.upsertAgentStrategyParam(ctx, change.ParamName, change.OldValue, "auto rollback: no improvement for 3 runs"); err != nil {
+				return err
+			}
+			change.Status = "rolled_back"
+			change.Decision = "rollback"
+			change.Reason = "no improvement for 3 consecutive runs"
+			change.FinalizedAt = &now
+			if s.metrics != nil {
+				s.metrics.AddAgentStrategyRollback(strategyScopeAgentParamTuning, "no_improve_3x", 1)
+			}
+		} else if improved && change.ObservedRuns >= 3 {
+			change.Status = "kept"
+			change.Decision = "keep"
+			change.Reason = "target metric improved in evaluation window"
+			change.FinalizedAt = &now
+		}
+		if err := s.db.WithContext(ctx).Save(change).Error; err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (s *Service) hasMonitoringParamChange(ctx context.Context, param string) (bool, error) {
+	var count int64
+	err := s.db.WithContext(ctx).
+		Model(&model.AgentStrategyChange{}).
+		Where("scope = ? AND subject = ? AND param_name = ? AND status = ?", strategyScopeAgentParamTuning, strategySubjectAgentCycle, param, "monitoring").
+		Count(&count).Error
+	if err != nil {
+		msg := strings.ToLower(err.Error())
+		if strings.Contains(msg, "no such table") || strings.Contains(msg, "does not exist") {
+			return false, nil
+		}
+		return false, err
+	}
+	return count > 0, nil
+}
+
+func (s *Service) applyParamAdjustmentProposal(ctx context.Context, proposal paramAdjustmentProposal, snap paramTuningSnapshot) error {
+	now := time.Now().UTC()
+	if err := s.upsertAgentStrategyParam(ctx, proposal.Param, proposal.NewValue, proposal.Reason); err != nil {
+		return err
+	}
+	change := model.AgentStrategyChange{
+		Scope:         strategyScopeAgentParamTuning,
+		Subject:       strategySubjectAgentCycle,
+		ParamName:     proposal.Param,
+		OldValue:      proposal.OldValue,
+		NewValue:      proposal.NewValue,
+		TargetMetric:  proposal.TargetMetric,
+		BaselineValue: tuningObservedMetric(proposal.TargetMetric, snap),
+		LatestValue:   tuningObservedMetric(proposal.TargetMetric, snap),
+		Status:        "monitoring",
+		Decision:      "pending",
+		Reason:        proposal.Reason,
+		CreatedAt:     now,
+		UpdatedAt:     now,
+	}
+	return s.db.WithContext(ctx).Create(&change).Error
+}
+
+func tuningObservedMetric(target string, snap paramTuningSnapshot) float64 {
+	switch strings.ToLower(strings.TrimSpace(target)) {
+	case "error_rate":
+		return snap.ErrorRate
+	default:
+		return float64(snap.SignalsGenerated)
+	}
+}
+
+func isTuningMetricImproved(target string, baseline, latest float64) bool {
+	switch strings.ToLower(strings.TrimSpace(target)) {
+	case "error_rate":
+		return latest < baseline
+	default:
+		return latest > baseline
+	}
+}
+
+func (s *Service) upsertAgentStrategyParam(ctx context.Context, key string, value float64, reason string) error {
+	now := time.Now().UTC()
+	var row model.AgentStrategyParam
+	err := s.db.WithContext(ctx).Where("\"key\" = ?", key).Take(&row).Error
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			row = model.AgentStrategyParam{
+				Key:       key,
+				Scope:     strategySubjectAgentCycle,
+				Value:     value,
+				Enabled:   true,
+				Reason:    reason,
+				CreatedAt: now,
+				UpdatedAt: now,
+			}
+			return s.db.WithContext(ctx).Create(&row).Error
+		}
+		msg := strings.ToLower(err.Error())
+		if strings.Contains(msg, "no such table") || strings.Contains(msg, "does not exist") {
+			return nil
+		}
+		return err
+	}
+	row.Value = value
+	row.Enabled = true
+	row.Reason = reason
+	row.UpdatedAt = now
+	return s.db.WithContext(ctx).Save(&row).Error
+}
+
+func (s *Service) applyAgentCycleParamOverrides(ctx context.Context, options CycleOptions) CycleOptions {
+	if s == nil || s.db == nil {
+		return s.enforceAgentParamConstraints(options)
+	}
+	var rows []model.AgentStrategyParam
+	err := s.db.WithContext(ctx).
+		Where("scope = ? AND enabled = ?", strategySubjectAgentCycle, true).
+		Find(&rows).Error
+	if err != nil {
+		msg := strings.ToLower(err.Error())
+		if s.log != nil && !strings.Contains(msg, "no such table") && !strings.Contains(msg, "does not exist") {
+			s.log.Warn("load strategy param overrides failed", zap.Error(err))
+		}
+		return s.enforceAgentParamConstraints(options)
+	}
+	for _, row := range rows {
+		switch strings.TrimSpace(row.Key) {
+		case strategyParamMaxToolCalls:
+			options.MaxToolCalls = int(row.Value)
+		case strategyParamMaxExternalReqs:
+			options.MaxExternalRequests = int(row.Value)
+		case strategyParamMarketLimit:
+			options.MarketLimit = int(row.Value)
+		}
+	}
+	return s.enforceAgentParamConstraints(options)
+}
+
+func (s *Service) enforceAgentParamConstraints(options CycleOptions) CycleOptions {
+	out := normalizeCycleOptions(options)
+	out.MaxToolCalls = int(clampFloat(float64(out.MaxToolCalls), 4, 24))
+	out.MaxExternalRequests = int(clampFloat(float64(out.MaxExternalRequests), 20, 400))
+	out.MarketLimit = int(clampFloat(float64(out.MarketLimit), 50, 500))
+	minExternal := out.MaxToolCalls * 3
+	if out.MaxExternalRequests < minExternal {
+		out.MaxExternalRequests = minExternal
+	}
+	if out.MaxExternalRequests > 400 {
+		out.MaxExternalRequests = 400
+	}
+	return out
+}
+
+func clampFloat(v, minV, maxV float64) float64 {
+	if v < minV {
+		return minV
+	}
+	if v > maxV {
+		return maxV
+	}
+	return v
+}
+
+func (s *Service) evaluateStrategyEvolution(promptBundle cyclePromptBundle, options CycleOptions, result *CycleResult, funnel map[string]any) {
+	if s == nil || s.db == nil {
+		return
+	}
+	s.evaluateAgentParamTuning(options, result, funnel)
+	version := strings.TrimSpace(promptBundle.Version)
+	if version == "" || strings.TrimSpace(promptBundle.Variant) != "candidate" {
+		return
+	}
+	observed := extractFunnelInt(funnel, "signals_generated")
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	if err := s.evaluateCandidatePromptRollout(ctx, version, observed); err != nil && s.log != nil {
+		s.log.Warn("evaluate strategy evolution failed",
+			zap.Error(err),
+			zap.String("scope", strategyScopePromptRollout),
+			zap.String("subject", version),
+			zap.String("session_id", result.SessionID),
+		)
+	}
+}
+
+func (s *Service) evaluateCandidatePromptRollout(ctx context.Context, version string, observedSignals int) error {
+	var prompt model.PromptVersion
+	if err := s.db.WithContext(ctx).
+		Where("version = ? AND COALESCE(stage,'') = ?", version, "candidate").
+		Order("updated_at DESC, id DESC").
+		Limit(1).
+		Take(&prompt).Error; err != nil {
+		return err
+	}
+
+	var change model.AgentStrategyChange
+	err := s.db.WithContext(ctx).
+		Where("scope = ? AND subject = ? AND status = ?", strategyScopePromptRollout, version, "monitoring").
+		Order("updated_at DESC, id DESC").
+		Limit(1).
+		Take(&change).Error
+	if err != nil {
+		if !errors.Is(err, gorm.ErrRecordNotFound) {
+			return err
+		}
+		baseline, bErr := s.activePromptSignalsBaseline(ctx, 24)
+		if bErr != nil {
+			return bErr
+		}
+		change = model.AgentStrategyChange{
+			Scope:         strategyScopePromptRollout,
+			Subject:       version,
+			ParamName:     "rollout_pct",
+			OldValue:      0,
+			NewValue:      prompt.RolloutPct,
+			TargetMetric:  "signals_per_run",
+			BaselineValue: baseline,
+			Status:        "monitoring",
+			Decision:      "pending",
+			CreatedAt:     time.Now().UTC(),
+		}
+		if err := s.db.WithContext(ctx).Create(&change).Error; err != nil {
+			return err
+		}
+	}
+
+	obsv := float64(observedSignals)
+	improved := obsv > change.BaselineValue
+	change.ObservedRuns++
+	change.LatestValue = obsv
+	if improved {
+		change.NoImproveStreak = 0
+	} else {
+		change.NoImproveStreak++
+	}
+	change.UpdatedAt = time.Now().UTC()
+
+	if change.NoImproveStreak >= 3 {
+		now := time.Now().UTC()
+		if err := s.db.WithContext(ctx).
+			Model(&model.PromptVersion{}).
+			Where("version = ? AND COALESCE(stage,'') = ?", version, "candidate").
+			Updates(map[string]any{
+				"rollout_pct": 0,
+				"updated_at":  now,
+			}).Error; err != nil {
+			return err
+		}
+		change.Status = "rolled_back"
+		change.Decision = "rollback"
+		change.Reason = "no improvement for 3 consecutive candidate cycles"
+		change.FinalizedAt = &now
+		if s.metrics != nil {
+			s.metrics.AddAgentStrategyRollback(strategyScopePromptRollout, "no_improve_3x", 1)
+		}
+	} else if improved && change.ObservedRuns >= 3 {
+		now := time.Now().UTC()
+		change.Status = "kept"
+		change.Decision = "keep"
+		change.Reason = "candidate improved target metric in evaluation window"
+		change.FinalizedAt = &now
+	}
+
+	return s.db.WithContext(ctx).Save(&change).Error
+}
+
+func (s *Service) activePromptSignalsBaseline(ctx context.Context, windowHours int) (float64, error) {
+	if windowHours <= 0 {
+		windowHours = 24
+	}
+	cutoff := time.Now().UTC().Add(-time.Duration(windowHours) * time.Hour)
+	var rows []model.AgentSession
+	if err := s.db.WithContext(ctx).
+		Where("started_at >= ? AND COALESCE(prompt_variant, '') = ?", cutoff, "active").
+		Order("started_at DESC").
+		Limit(500).
+		Find(&rows).Error; err != nil {
+		return 0, err
+	}
+	if len(rows) == 0 {
+		return 0, nil
+	}
+	var sum int64
+	for _, row := range rows {
+		sum += extractSignalsGeneratedFromSummaryJSON(row.SummaryJSON)
+	}
+	return float64(sum) / float64(len(rows)), nil
+}
+
+func extractSignalsGeneratedFromSummaryJSON(raw []byte) int64 {
+	if len(raw) == 0 {
+		return 0
+	}
+	var obj map[string]any
+	if err := json.Unmarshal(raw, &obj); err != nil {
+		return 0
+	}
+	funnel, ok := obj["funnel"].(map[string]any)
+	if !ok {
+		return 0
+	}
+	return int64(extractFunnelInt(funnel, "signals_generated"))
 }
 
 func (s *Service) acquireCycleLock(ctx context.Context) (unlock func(), acquired bool, err error) {
@@ -1548,20 +2366,29 @@ func (s *Service) acquireCycleLock(ctx context.Context) (unlock func(), acquired
 		return s.cycleMu.Unlock, true, nil
 	}
 	if strings.EqualFold(s.db.Dialector.Name(), "postgres") {
+		sqlDB, dbErr := s.db.DB()
+		if dbErr != nil {
+			return nil, false, dbErr
+		}
+		conn, connErr := sqlDB.Conn(ctx)
+		if connErr != nil {
+			return nil, false, connErr
+		}
 		var ok bool
-		if err := s.db.WithContext(ctx).
-			Raw("SELECT pg_try_advisory_lock(?)", defaultCycleAdvisoryLockKey).
-			Scan(&ok).Error; err != nil {
+		if err := conn.QueryRowContext(ctx, "SELECT pg_try_advisory_lock($1)", defaultCycleAdvisoryLockKey).Scan(&ok); err != nil {
+			_ = conn.Close()
 			return nil, false, err
 		}
 		if !ok {
+			_ = conn.Close()
 			return nil, false, nil
 		}
 		unlockFn := func() {
 			releaseCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 			defer cancel()
-			_ = s.db.WithContext(releaseCtx).
-				Exec("SELECT pg_advisory_unlock(?)", defaultCycleAdvisoryLockKey).Error
+			var released bool
+			_ = conn.QueryRowContext(releaseCtx, "SELECT pg_advisory_unlock($1)", defaultCycleAdvisoryLockKey).Scan(&released)
+			_ = conn.Close()
 		}
 		return unlockFn, true, nil
 	}
@@ -1634,7 +2461,7 @@ func (s *Service) observeCycleMetrics(result *CycleResult, fallbackReason string
 	if s == nil || s.metrics == nil || result == nil {
 		return
 	}
-	s.metrics.ObserveAgentCycle(result.Status, result.Decision, result.FinishedAt.Sub(result.StartedAt), result.LLMCalls)
+	s.metrics.ObserveAgentCycle(result.Status, result.Decision, result.FinishedAt.Sub(result.StartedAt), result.LLMCalls, result.LLMTokens)
 	if fallbackReason != "" {
 		s.metrics.AddAgentCycleFallback(fallbackReason, 1)
 	}
@@ -1648,6 +2475,24 @@ func (s *Service) observeCycleMetrics(result *CycleResult, fallbackReason string
 		}
 		s.metrics.AddAgentCycleToolError(issue.Source, issue.Code, max(issue.Count, 1))
 	}
+}
+
+func normalizeCycleDecision(input string) string {
+	d := strings.ToLower(strings.TrimSpace(input))
+	if d == "" {
+		return "run"
+	}
+	switch d {
+	case "run", "skip":
+		return d
+	}
+	if strings.Contains(d, "skip") || strings.Contains(d, "hold") || strings.Contains(d, "wait") {
+		return "skip"
+	}
+	if strings.Contains(d, "run") || strings.Contains(d, "proceed") || strings.Contains(d, "continue") {
+		return "run"
+	}
+	return "run"
 }
 
 func mergeFreshness(dst map[string]float64, src map[string]float64) {

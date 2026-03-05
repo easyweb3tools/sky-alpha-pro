@@ -36,12 +36,19 @@ type Registry struct {
 	agentCycleRunsTotal          *prometheus.CounterVec
 	agentCycleDuration           *prometheus.HistogramVec
 	agentCycleLLMCalls           prometheus.Histogram
+	agentCycleLLMTokens          prometheus.Histogram
 	agentCycleToolErrors         *prometheus.CounterVec
 	agentCycleFallbackTotal      *prometheus.CounterVec
 	agentMemoryHitTotal          prometheus.Counter
+	agentStrategyRollbacksTotal  *prometheus.CounterVec
 	marketSpecReadyTotal         prometheus.Gauge
 	marketCityMissingTotal       prometheus.Gauge
 	marketSpecFillSuccessRate    prometheus.Gauge
+	opportunityEventsTotal       *prometheus.CounterVec
+	candidatePoolSize            *prometheus.GaugeVec
+	triggerToSignalLatency       prometheus.Histogram
+	hotMarketHitRate             prometheus.Gauge
+	eventDedupDroppedTotal       prometheus.Counter
 
 	cacheMu               sync.RWMutex
 	dataFreshnessSnapshot map[string]float64
@@ -166,6 +173,13 @@ func New(cfg config.MetricsConfig) *Registry {
 			Help:      "LLM calls per agent cycle.",
 			Buckets:   []float64{0, 1, 2, 3, 5, 8},
 		}),
+		agentCycleLLMTokens: prometheus.NewHistogram(prometheus.HistogramOpts{
+			Namespace: "sky_alpha",
+			Subsystem: "agent",
+			Name:      "cycle_llm_tokens",
+			Help:      "LLM tokens per agent cycle.",
+			Buckets:   []float64{0, 50, 100, 200, 400, 800, 1200, 2000, 4000, 8000, 12000, 20000},
+		}),
 		agentCycleToolErrors: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Namespace: "sky_alpha",
 			Subsystem: "agent",
@@ -184,6 +198,12 @@ func New(cfg config.MetricsConfig) *Registry {
 			Name:      "memory_hit_total",
 			Help:      "Total memory summaries injected into agent cycle context.",
 		}),
+		agentStrategyRollbacksTotal: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Namespace: "sky_alpha",
+			Subsystem: "agent",
+			Name:      "strategy_rollbacks_total",
+			Help:      "Total automatic strategy rollbacks grouped by scope and reason.",
+		}, []string{"scope", "reason"}),
 		marketSpecReadyTotal: prometheus.NewGauge(prometheus.GaugeOpts{
 			Namespace: "sky_alpha",
 			Subsystem: "signal",
@@ -201,6 +221,37 @@ func New(cfg config.MetricsConfig) *Registry {
 			Subsystem: "signal",
 			Name:      "spec_fill_success_rate",
 			Help:      "Spec fill success rate among active markets (0~1).",
+		}),
+		opportunityEventsTotal: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Namespace: "sky_alpha",
+			Subsystem: "opportunity",
+			Name:      "events_total",
+			Help:      "Opportunity events emitted grouped by type and status.",
+		}, []string{"type", "status"}),
+		candidatePoolSize: prometheus.NewGaugeVec(prometheus.GaugeOpts{
+			Namespace: "sky_alpha",
+			Subsystem: "opportunity",
+			Name:      "candidate_pool_size",
+			Help:      "Current candidate market pool size grouped by state.",
+		}, []string{"state"}),
+		triggerToSignalLatency: prometheus.NewHistogram(prometheus.HistogramOpts{
+			Namespace: "sky_alpha",
+			Subsystem: "opportunity",
+			Name:      "trigger_to_signal_latency_seconds",
+			Help:      "Latency between first consumed event and first generated signal per opportunity cycle.",
+			Buckets:   []float64{1, 2, 5, 10, 20, 30, 60, 120, 300, 600, 1800},
+		}),
+		hotMarketHitRate: prometheus.NewGauge(prometheus.GaugeOpts{
+			Namespace: "sky_alpha",
+			Subsystem: "opportunity",
+			Name:      "hot_market_hit_rate",
+			Help:      "Signal hit rate on selected hot/tradable markets in latest opportunity cycle (0~1).",
+		}),
+		eventDedupDroppedTotal: prometheus.NewCounter(prometheus.CounterOpts{
+			Namespace: "sky_alpha",
+			Subsystem: "opportunity",
+			Name:      "event_dedup_dropped_total",
+			Help:      "Total opportunity events dropped by deduplication window.",
 		}),
 		dataFreshnessSeconds: prometheus.NewGaugeVec(prometheus.GaugeOpts{
 			Namespace: "sky_alpha",
@@ -237,12 +288,19 @@ func New(cfg config.MetricsConfig) *Registry {
 		r.agentCycleRunsTotal,
 		r.agentCycleDuration,
 		r.agentCycleLLMCalls,
+		r.agentCycleLLMTokens,
 		r.agentCycleToolErrors,
 		r.agentCycleFallbackTotal,
 		r.agentMemoryHitTotal,
+		r.agentStrategyRollbacksTotal,
 		r.marketSpecReadyTotal,
 		r.marketCityMissingTotal,
 		r.marketSpecFillSuccessRate,
+		r.opportunityEventsTotal,
+		r.candidatePoolSize,
+		r.triggerToSignalLatency,
+		r.hotMarketHitRate,
+		r.eventDedupDroppedTotal,
 		r.dataFreshnessSeconds,
 		r.fetchDataFreshnessSeconds,
 	)
@@ -392,7 +450,7 @@ func (r *Registry) SetDataFreshness(dataset string, seconds float64) {
 	r.cacheMu.Unlock()
 }
 
-func (r *Registry) ObserveAgentCycle(status, decision string, duration time.Duration, llmCalls int) {
+func (r *Registry) ObserveAgentCycle(status, decision string, duration time.Duration, llmCalls int, llmTokens int) {
 	if !r.Enabled() {
 		return
 	}
@@ -407,6 +465,7 @@ func (r *Registry) ObserveAgentCycle(status, decision string, duration time.Dura
 	r.agentCycleRunsTotal.WithLabelValues(s, d).Inc()
 	r.agentCycleDuration.WithLabelValues(s).Observe(duration.Seconds())
 	r.agentCycleLLMCalls.Observe(float64(llmCalls))
+	r.agentCycleLLMTokens.Observe(float64(llmTokens))
 }
 
 func (r *Registry) AddAgentCycleToolError(tool, errorCode string, n int) {
@@ -442,6 +501,21 @@ func (r *Registry) AddAgentMemoryHits(n int) {
 	r.agentMemoryHitTotal.Add(float64(n))
 }
 
+func (r *Registry) AddAgentStrategyRollback(scope, reason string, n int) {
+	if !r.Enabled() || n <= 0 {
+		return
+	}
+	sc := strings.TrimSpace(scope)
+	if sc == "" {
+		sc = "unknown"
+	}
+	rsn := strings.TrimSpace(reason)
+	if rsn == "" {
+		rsn = "unknown"
+	}
+	r.agentStrategyRollbacksTotal.WithLabelValues(sc, rsn).Add(float64(n))
+}
+
 func (r *Registry) SetMarketSpecCoverage(specReady, cityMissing, successRate float64) {
 	if !r.Enabled() {
 		return
@@ -455,6 +529,60 @@ func (r *Registry) SetMarketSpecCoverage(specReady, cityMissing, successRate flo
 		successRate = 1
 	}
 	r.marketSpecFillSuccessRate.Set(successRate)
+}
+
+func (r *Registry) AddOpportunityEvent(eventType, status string, n int) {
+	if !r.Enabled() || n <= 0 {
+		return
+	}
+	t := strings.TrimSpace(strings.ToLower(eventType))
+	if t == "" {
+		t = "unknown"
+	}
+	s := strings.TrimSpace(strings.ToLower(status))
+	if s == "" {
+		s = "unknown"
+	}
+	r.opportunityEventsTotal.WithLabelValues(t, s).Add(float64(n))
+	if s == "dedup_dropped" {
+		r.eventDedupDroppedTotal.Add(float64(n))
+	}
+}
+
+func (r *Registry) SetCandidatePoolStateCounts(states map[string]int64) {
+	if !r.Enabled() {
+		return
+	}
+	for _, state := range []string{"cold", "watch", "hot", "tradable", "cool_down"} {
+		r.candidatePoolSize.WithLabelValues(state).Set(0)
+	}
+	for k, v := range states {
+		state := strings.TrimSpace(strings.ToLower(k))
+		if state == "" {
+			continue
+		}
+		r.candidatePoolSize.WithLabelValues(state).Set(float64(v))
+	}
+}
+
+func (r *Registry) ObserveTriggerToSignalLatency(latency time.Duration) {
+	if !r.Enabled() || latency < 0 {
+		return
+	}
+	r.triggerToSignalLatency.Observe(latency.Seconds())
+}
+
+func (r *Registry) SetHotMarketHitRate(rate float64) {
+	if !r.Enabled() {
+		return
+	}
+	if rate < 0 {
+		rate = 0
+	}
+	if rate > 1 {
+		rate = 1
+	}
+	r.hotMarketHitRate.Set(rate)
 }
 
 func (r *Registry) SnapshotDataFreshness() map[string]float64 {

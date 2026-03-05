@@ -1,13 +1,17 @@
 package signal
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha1"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"math/rand"
+	"net/http"
+	"net/url"
 	"os"
 	"strings"
 	"sync"
@@ -41,9 +45,13 @@ type cityResolver struct {
 var errVertexGlobalBackoff = errors.New("vertex global backoff active")
 
 type cityVertexClient struct {
-	client  *genai.Client
-	model   string
-	timeout time.Duration
+	client     *genai.Client
+	httpClient *http.Client
+	apiKey     string
+	project    string
+	location   string
+	model      string
+	timeout    time.Duration
 }
 
 const signalCityResolverUseVertexEnv = "SKY_ALPHA_SIGNAL_CITY_RESOLVER_USE_VERTEX"
@@ -411,8 +419,9 @@ func normalizeText(v string) string {
 }
 
 func newCityVertexClient(log *zap.Logger) *cityVertexClient {
+	apiKey := strings.TrimSpace(os.Getenv("SKY_ALPHA_AGENT_VERTEX_API_KEY"))
 	project := strings.TrimSpace(os.Getenv("SKY_ALPHA_AGENT_VERTEX_PROJECT"))
-	if project == "" {
+	if apiKey == "" && project == "" {
 		return nil
 	}
 	location := strings.TrimSpace(os.Getenv("SKY_ALPHA_AGENT_VERTEX_LOCATION"))
@@ -424,28 +433,36 @@ func newCityVertexClient(log *zap.Logger) *cityVertexClient {
 		modelName = "gemini-2.5-flash"
 	}
 	timeout := 10 * time.Second
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
-	defer cancel()
-	client, err := genai.NewClient(ctx, &genai.ClientConfig{
-		Backend:  genai.BackendVertexAI,
-		Project:  project,
-		Location: location,
-	})
-	if err != nil {
-		if log != nil {
-			log.Warn("init city vertex client failed", zap.Error(err))
+	var client *genai.Client
+	if apiKey == "" {
+		ctx, cancel := context.WithTimeout(context.Background(), timeout)
+		defer cancel()
+		c, err := genai.NewClient(ctx, &genai.ClientConfig{
+			Backend:  genai.BackendVertexAI,
+			Project:  project,
+			Location: location,
+		})
+		if err != nil {
+			if log != nil {
+				log.Warn("init city vertex client failed", zap.Error(err))
+			}
+			return nil
 		}
-		return nil
+		client = c
 	}
 	return &cityVertexClient{
-		client:  client,
-		model:   modelName,
-		timeout: timeout,
+		client:     client,
+		httpClient: &http.Client{Timeout: timeout},
+		apiKey:     apiKey,
+		project:    project,
+		location:   location,
+		model:      modelName,
+		timeout:    timeout,
 	}
 }
 
 func (c *cityVertexClient) ResolveCity(ctx context.Context, question string, slug string) (string, error) {
-	if c == nil || c.client == nil {
+	if c == nil {
 		return "", fmt.Errorf("vertex client not configured")
 	}
 	callCtx, cancel := context.WithTimeout(ctx, c.timeout)
@@ -464,16 +481,88 @@ slug: %s`, strings.TrimSpace(question), strings.TrimSpace(slug))
 		},
 		Required: []string{"city"},
 	}
-	resp, err := c.client.Models.GenerateContent(callCtx, c.model, genai.Text(prompt), &genai.GenerateContentConfig{
-		ResponseMIMEType: "application/json",
-		ResponseSchema:   schema,
-		Temperature:      genai.Ptr(float32(0)),
-		MaxOutputTokens:  48,
-	})
-	if err != nil {
-		return "", err
+	var text string
+	if c.apiKey != "" {
+		if strings.TrimSpace(c.project) == "" {
+			return "", fmt.Errorf("vertex api key mode requires SKY_ALPHA_AGENT_VERTEX_PROJECT")
+		}
+		loc := strings.TrimSpace(c.location)
+		if loc == "" {
+			loc = "us-central1"
+		}
+		endpoint := fmt.Sprintf("https://%s-aiplatform.googleapis.com/v1/projects/%s/locations/%s/publishers/google/models/%s:generateContent?key=%s",
+			url.PathEscape(loc),
+			url.PathEscape(strings.TrimSpace(c.project)),
+			url.PathEscape(loc),
+			url.PathEscape(c.model),
+			url.QueryEscape(c.apiKey),
+		)
+		payload := map[string]any{
+			"contents": []map[string]any{
+				{
+					"role": "user",
+					"parts": []map[string]any{
+						{"text": prompt},
+					},
+				},
+			},
+			"generationConfig": map[string]any{
+				"temperature":      0,
+				"maxOutputTokens":  48,
+				"responseMimeType": "application/json",
+			},
+		}
+		raw, err := json.Marshal(payload)
+		if err != nil {
+			return "", err
+		}
+		req, err := http.NewRequestWithContext(callCtx, http.MethodPost, endpoint, bytes.NewReader(raw))
+		if err != nil {
+			return "", err
+		}
+		req.Header.Set("Content-Type", "application/json")
+		resp, err := c.httpClient.Do(req)
+		if err != nil {
+			return "", err
+		}
+		defer resp.Body.Close()
+		body, err := io.ReadAll(resp.Body)
+		if err != nil {
+			return "", err
+		}
+		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+			return "", fmt.Errorf("vertex api request failed: status=%d body=%s", resp.StatusCode, strings.TrimSpace(string(body)))
+		}
+		var parsed struct {
+			Candidates []struct {
+				Content struct {
+					Parts []struct {
+						Text string `json:"text"`
+					} `json:"parts"`
+				} `json:"content"`
+			} `json:"candidates"`
+		}
+		if err := json.Unmarshal(body, &parsed); err != nil {
+			return "", fmt.Errorf("decode vertex api response: %w", err)
+		}
+		if len(parsed.Candidates) > 0 && len(parsed.Candidates[0].Content.Parts) > 0 {
+			text = strings.TrimSpace(parsed.Candidates[0].Content.Parts[0].Text)
+		}
+	} else {
+		if c.client == nil {
+			return "", fmt.Errorf("vertex client not configured")
+		}
+		resp, err := c.client.Models.GenerateContent(callCtx, c.model, genai.Text(prompt), &genai.GenerateContentConfig{
+			ResponseMIMEType: "application/json",
+			ResponseSchema:   schema,
+			Temperature:      genai.Ptr(float32(0)),
+			MaxOutputTokens:  48,
+		})
+		if err != nil {
+			return "", err
+		}
+		text = strings.TrimSpace(resp.Text())
 	}
-	text := strings.TrimSpace(resp.Text())
 	if text == "" {
 		return "", nil
 	}

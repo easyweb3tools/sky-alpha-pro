@@ -348,7 +348,7 @@ func (s *Service) analyzeMarket(ctx context.Context, sessionID string, m model.M
 	}
 
 	recommendation := buildRecommendation(edgePct, priceYes)
-	if s.vertexAI != nil {
+	if s.vertexAI != nil && s.cfg.AllowLegacyVertexAnalyze {
 		toolStart = time.Now()
 		vertexResult, usage, vertexErr := s.vertexAI.Analyze(ctx, vertexPromptInput{
 			Question:         m.Question,
@@ -376,6 +376,8 @@ func (s *Service) analyzeMarket(ctx context.Context, sessionID string, m model.M
 			reasoning = vertexResult.Reasoning
 			riskFactors = mergeUniqueStrings(riskFactors, vertexResult.RiskFactors)
 		}
+	} else if s.vertexAI != nil && !s.cfg.AllowLegacyVertexAnalyze {
+		riskFactors = append(riskFactors, "legacy vertex analyze disabled; decision by deterministic signal path")
 	}
 
 	if depth == DepthFull && len(forecastValues) > 0 {

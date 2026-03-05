@@ -88,6 +88,8 @@ type AgentConfig struct {
 	Concurrency           int           `mapstructure:"concurrency"`
 	MarketTimeout         time.Duration `mapstructure:"market_timeout"`
 	MaxForecastDays       int           `mapstructure:"max_forecast_days"`
+	AllowLegacyVertexAnalyze bool       `mapstructure:"allow_legacy_vertex_analyze"`
+	VertexAPIKey          string        `mapstructure:"vertex_api_key"`
 	VertexProject         string        `mapstructure:"vertex_project"`
 	VertexLocation        string        `mapstructure:"vertex_location"`
 	VertexModel           string        `mapstructure:"vertex_model"`
@@ -140,12 +142,13 @@ type SchedulerConfig struct {
 }
 
 type SchedulerJobsConfig struct {
-	MarketSync      SchedulerJobConfig         `mapstructure:"market_sync"`
-	MarketSpecFill  SchedulerSpecFillJobConfig `mapstructure:"market_spec_fill"`
-	WeatherForecast SchedulerWeatherJobConfig  `mapstructure:"weather_forecast"`
-	ChainScan       SchedulerChainJobConfig    `mapstructure:"chain_scan"`
-	SimCycle        SchedulerJobConfig         `mapstructure:"sim_cycle"`
-	AgentCycle      SchedulerAgentJobConfig    `mapstructure:"agent_cycle"`
+	MarketSync       SchedulerJobConfig            `mapstructure:"market_sync"`
+	MarketSpecFill   SchedulerSpecFillJobConfig    `mapstructure:"market_spec_fill"`
+	WeatherForecast  SchedulerWeatherJobConfig     `mapstructure:"weather_forecast"`
+	ChainScan        SchedulerChainJobConfig       `mapstructure:"chain_scan"`
+	OpportunityCycle SchedulerOpportunityJobConfig `mapstructure:"opportunity_cycle"`
+	SimCycle         SchedulerJobConfig            `mapstructure:"sim_cycle"`
+	AgentCycle       SchedulerAgentJobConfig       `mapstructure:"agent_cycle"`
 }
 
 type SchedulerJobConfig struct {
@@ -192,8 +195,33 @@ type SchedulerAgentJobConfig struct {
 	TradeEnabled        bool          `mapstructure:"trade_enabled"`
 	MaxToolCalls        int           `mapstructure:"max_tool_calls"`
 	MaxExternalRequests int           `mapstructure:"max_external_requests"`
+	MaxTokensPerCycle   int           `mapstructure:"max_tokens_per_cycle"`
+	MaxCycleDuration    time.Duration `mapstructure:"max_cycle_duration"`
 	MemoryWindow        int           `mapstructure:"memory_window"`
 	MarketLimit         int           `mapstructure:"market_limit"`
+}
+
+type SchedulerOpportunityJobConfig struct {
+	Enabled                 bool          `mapstructure:"enabled"`
+	Interval                time.Duration `mapstructure:"interval"`
+	Timeout                 time.Duration `mapstructure:"timeout"`
+	Immediate               bool          `mapstructure:"immediate"`
+	ConsumeLimit            int           `mapstructure:"consume_limit"`
+	DecayWatchAfter         time.Duration `mapstructure:"decay_watch_after"`
+	DecayCooldownAfter      time.Duration `mapstructure:"decay_cooldown_after"`
+	TriggerAgent            bool          `mapstructure:"trigger_agent"`
+	AgentCandidateLimit     int           `mapstructure:"agent_candidate_limit"`
+	AgentMaxHotMarkets      int           `mapstructure:"agent_max_hot_markets"`
+	AgentMinCandidates      int           `mapstructure:"agent_min_candidates"`
+	AgentMinConsumedEvents  int           `mapstructure:"agent_min_consumed_events"`
+	MaxSignalWritesPerCycle int           `mapstructure:"max_signal_writes_per_cycle"`
+	ScoreEdgeRefPct         float64       `mapstructure:"score_edge_ref_pct"`
+	ScoreWeightEdge         float64       `mapstructure:"score_weight_edge"`
+	ScoreWeightLiquidity    float64       `mapstructure:"score_weight_liquidity"`
+	ScoreWeightFreshness    float64       `mapstructure:"score_weight_freshness"`
+	ScoreWeightExpiry       float64       `mapstructure:"score_weight_expiry"`
+	ScoreFreshnessMaxAge    time.Duration `mapstructure:"score_freshness_max_age"`
+	AgentRunMode            string        `mapstructure:"agent_run_mode"`
 }
 
 type MetricsConfig struct {
@@ -279,6 +307,8 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("agent.concurrency", 8)
 	v.SetDefault("agent.market_timeout", "20s")
 	v.SetDefault("agent.max_forecast_days", 10)
+	v.SetDefault("agent.allow_legacy_vertex_analyze", false)
+	v.SetDefault("agent.vertex_api_key", "")
 	v.SetDefault("agent.vertex_project", "")
 	v.SetDefault("agent.vertex_location", "us-central1")
 	v.SetDefault("agent.vertex_model", "gemini-2.5-pro")
@@ -342,6 +372,26 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("scheduler.jobs.chain_scan.immediate", false)
 	v.SetDefault("scheduler.jobs.chain_scan.lookback_blocks", uint64(0))
 	v.SetDefault("scheduler.jobs.chain_scan.max_tx", 0)
+	v.SetDefault("scheduler.jobs.opportunity_cycle.enabled", true)
+	v.SetDefault("scheduler.jobs.opportunity_cycle.interval", "2m")
+	v.SetDefault("scheduler.jobs.opportunity_cycle.timeout", "30s")
+	v.SetDefault("scheduler.jobs.opportunity_cycle.immediate", true)
+	v.SetDefault("scheduler.jobs.opportunity_cycle.consume_limit", 200)
+	v.SetDefault("scheduler.jobs.opportunity_cycle.decay_watch_after", "45m")
+	v.SetDefault("scheduler.jobs.opportunity_cycle.decay_cooldown_after", "30m")
+	v.SetDefault("scheduler.jobs.opportunity_cycle.trigger_agent", true)
+	v.SetDefault("scheduler.jobs.opportunity_cycle.agent_candidate_limit", 20)
+	v.SetDefault("scheduler.jobs.opportunity_cycle.agent_max_hot_markets", 10)
+	v.SetDefault("scheduler.jobs.opportunity_cycle.agent_min_candidates", 1)
+	v.SetDefault("scheduler.jobs.opportunity_cycle.agent_min_consumed_events", 1)
+	v.SetDefault("scheduler.jobs.opportunity_cycle.max_signal_writes_per_cycle", 5)
+	v.SetDefault("scheduler.jobs.opportunity_cycle.score_edge_ref_pct", 10.0)
+	v.SetDefault("scheduler.jobs.opportunity_cycle.score_weight_edge", 0.55)
+	v.SetDefault("scheduler.jobs.opportunity_cycle.score_weight_liquidity", 0.2)
+	v.SetDefault("scheduler.jobs.opportunity_cycle.score_weight_freshness", 0.15)
+	v.SetDefault("scheduler.jobs.opportunity_cycle.score_weight_expiry", 0.10)
+	v.SetDefault("scheduler.jobs.opportunity_cycle.score_freshness_max_age", "2h")
+	v.SetDefault("scheduler.jobs.opportunity_cycle.agent_run_mode", "event_driven")
 
 	v.SetDefault("scheduler.jobs.sim_cycle.enabled", false)
 	v.SetDefault("scheduler.jobs.sim_cycle.interval", "5m")
@@ -356,6 +406,8 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("scheduler.jobs.agent_cycle.trade_enabled", false)
 	v.SetDefault("scheduler.jobs.agent_cycle.max_tool_calls", 12)
 	v.SetDefault("scheduler.jobs.agent_cycle.max_external_requests", 200)
+	v.SetDefault("scheduler.jobs.agent_cycle.max_tokens_per_cycle", 12000)
+	v.SetDefault("scheduler.jobs.agent_cycle.max_cycle_duration", "90s")
 	v.SetDefault("scheduler.jobs.agent_cycle.memory_window", 3)
 	v.SetDefault("scheduler.jobs.agent_cycle.market_limit", 300)
 

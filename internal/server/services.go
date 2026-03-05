@@ -7,6 +7,7 @@ import (
 	"sky-alpha-pro/internal/agent"
 	"sky-alpha-pro/internal/chain"
 	"sky-alpha-pro/internal/market"
+	"sky-alpha-pro/internal/opportunity"
 	"sky-alpha-pro/internal/player"
 	"sky-alpha-pro/internal/signal"
 	"sky-alpha-pro/internal/sim"
@@ -17,14 +18,15 @@ import (
 )
 
 type Services struct {
-	Market  *market.Service
-	Weather *weather.Service
-	Signal  *signal.Service
-	Agent   *agent.Service
-	Trade   *trade.Service
-	Chain   *chain.Service
-	Player  *player.Service
-	Sim     *sim.Service
+	Market      *market.Service
+	Weather     *weather.Service
+	Signal      *signal.Service
+	Agent       *agent.Service
+	Trade       *trade.Service
+	Chain       *chain.Service
+	Player      *player.Service
+	Sim         *sim.Service
+	Opportunity *opportunity.Service
 }
 
 func NewServices(cfg *config.Config, log *zap.Logger, db *gorm.DB) *Services {
@@ -33,6 +35,9 @@ func NewServices(cfg *config.Config, log *zap.Logger, db *gorm.DB) *Services {
 
 func NewServicesWithMetrics(cfg *config.Config, log *zap.Logger, db *gorm.DB, metricReg *metrics.Registry) *Services {
 	marketSvc := market.NewService(cfg.Market, db, log)
+	opportunitySvc := opportunity.NewService(db)
+	opportunitySvc.SetMetrics(metricReg)
+	marketSvc.SetEventSink(opportunitySvc)
 	weatherSvc := weather.NewService(cfg.Weather, db, log)
 	signalSvc := signal.NewService(cfg.Signal, db, log)
 	agentSvc := agent.NewService(cfg.Agent, db, log, weatherSvc, signalSvc)
@@ -47,13 +52,14 @@ func NewServicesWithMetrics(cfg *config.Config, log *zap.Logger, db *gorm.DB, me
 	simSvc := sim.NewService(cfg.Sim, db, log, marketSvc, weatherSvc, signalSvc, tradeSvc)
 
 	return &Services{
-		Market:  marketSvc,
-		Weather: weatherSvc,
-		Signal:  signalSvc,
-		Agent:   agentSvc,
-		Trade:   tradeSvc,
-		Chain:   chainSvc,
-		Player:  playerSvc,
-		Sim:     simSvc,
+		Market:      marketSvc,
+		Weather:     weatherSvc,
+		Signal:      signalSvc,
+		Agent:       agentSvc,
+		Trade:       tradeSvc,
+		Chain:       chainSvc,
+		Player:      playerSvc,
+		Sim:         simSvc,
+		Opportunity: opportunitySvc,
 	}
 }

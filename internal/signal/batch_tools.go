@@ -31,6 +31,8 @@ type ResolveCitiesResult struct {
 
 type ResolvedCity struct {
 	MarketID   string  `json:"market_id"`
+	PrevStatus string  `json:"prev_status,omitempty"`
+	Status     string  `json:"status,omitempty"`
 	City       string  `json:"city"`
 	Source     string  `json:"source"`
 	Confidence float64 `json:"confidence"`
@@ -61,15 +63,27 @@ func (s *Service) ResolveMarketCities(ctx context.Context, opts ResolveCitiesOpt
 	if err := query.Limit(limit).Find(&markets).Error; err != nil {
 		return nil, err
 	}
+	supported := make([]model.Market, 0, len(markets))
+	unsupported := 0
+	for _, m := range markets {
+		if IsSupportedMarketForSignal(m) {
+			supported = append(supported, m)
+			continue
+		}
+		unsupported++
+	}
 
 	result := &ResolveCitiesResult{
-		Processed:   len(markets),
+		Processed:   len(supported),
 		Sources:     map[string]int{},
 		SkipReasons: map[string]int{},
-		Items:       make([]ResolvedCity, 0, len(markets)),
+		Items:       make([]ResolvedCity, 0, len(supported)),
 		Errors:      make([]string, 0),
 	}
-	if len(markets) == 0 {
+	if unsupported > 0 {
+		result.SkipReasons[skipReasonUnsupportedMarket] = unsupported
+	}
+	if len(supported) == 0 {
 		return result, nil
 	}
 
@@ -87,7 +101,7 @@ func (s *Service) ResolveMarketCities(ctx context.Context, opts ResolveCitiesOpt
 	g, gctx := errgroup.WithContext(ctx)
 	g.SetLimit(workers)
 
-	for _, market := range markets {
+	for _, market := range supported {
 		m := market
 		g.Go(func() error {
 			spec, skipReason, specErr := s.ensureMarketSpec(gctx, m, knownCities)
@@ -116,6 +130,8 @@ func (s *Service) ResolveMarketCities(ctx context.Context, opts ResolveCitiesOpt
 			}
 			result.Items = append(result.Items, ResolvedCity{
 				MarketID:   m.ID,
+				PrevStatus: strings.ToLower(strings.TrimSpace(m.SpecStatus)),
+				Status:     strings.ToLower(strings.TrimSpace(spec.Status)),
 				City:       spec.City,
 				Source:     source,
 				Confidence: confidence,
