@@ -138,6 +138,11 @@ type cyclePromptBundle struct {
 	System  string
 }
 
+func isVertexBrainMode(runMode string) bool {
+	mode := strings.ToLower(strings.TrimSpace(runMode))
+	return mode == "vertex_brain" || mode == "vertex-controlled" || mode == "vertex_controlled"
+}
+
 func (s *Service) RunCycle(ctx context.Context, opts CycleOptions) (*CycleResult, error) {
 	started := time.Now().UTC()
 	options := normalizeCycleOptions(opts)
@@ -202,7 +207,180 @@ func (s *Service) RunCycle(ctx context.Context, opts CycleOptions) (*CycleResult
 		StartedAt: started,
 	}
 
-	plan, modelName, fallbackReason := s.buildPlan(ctx, input, promptBundle.System, result)
+	plan := cyclePlanOutput{}
+	fallbackReason := ""
+	if isVertexBrainMode(options.RunMode) && s.vertexAI != nil {
+		result.Decision = "run"
+		result.Model = s.vertexAI.ModelName()
+		history := make([]map[string]any, 0, options.MaxToolCalls)
+		funnel := map[string]any{}
+		var reportID uint64
+		executedSteps := make([]cyclePlanStep, 0, options.MaxToolCalls+2)
+		externalUsed := 0
+		stepNo := 1
+		for stepNo <= options.MaxToolCalls {
+			if externalUsed >= options.MaxExternalRequests {
+				result.Warnings = append(result.Warnings, CycleIssue{
+					Code:    "external_budget_exhausted",
+					Message: "max external request budget reached",
+					Source:  "agent_cycle",
+					Count:   1,
+				})
+				result.Status = cycleStatusDegraded
+				break
+			}
+			result.LLMCalls++
+			action, actionErr := s.vertexAI.NextCycleAction(ctx, input, history, stepNo, options.MaxToolCalls)
+			if actionErr != nil {
+				result.Warnings = append(result.Warnings, CycleIssue{
+					Code:    issueCodePlanDecodeFailed,
+					Message: actionErr.Error(),
+					Source:  "vertex_ai",
+					Count:   1,
+				})
+				result.Status = cycleStatusDegraded
+				fallbackReason = "vertex_next_action_failed"
+				break
+			}
+			if action.Decision == "finish" {
+				break
+			}
+			if action.Decision != "call_tool" || strings.TrimSpace(action.Tool) == "" {
+				result.Warnings = append(result.Warnings, CycleIssue{
+					Code:    issueCodePlanValidationFailed,
+					Message: "vertex action invalid decision/tool",
+					Source:  "vertex_ai",
+					Count:   1,
+				})
+				result.Status = cycleStatusDegraded
+				break
+			}
+
+			step := cyclePlanStep{
+				Step:   stepNo,
+				Tool:   strings.TrimSpace(action.Tool),
+				Why:    strings.TrimSpace(action.Why),
+				Args:   action.Args,
+				OnFail: action.OnFail,
+			}
+			if step.OnFail == "" {
+				step.OnFail = "continue"
+			}
+			if step.Args == nil {
+				step.Args = map[string]any{}
+			}
+			executedSteps = append(executedSteps, step)
+
+			exec, stepErr := s.executePlanStep(ctx, step, options, result, funnel)
+			result.ToolCalls++
+			externalUsed += exec.ExternalRequests
+			result.Records = append(result.Records, exec.Records...)
+			result.Errors = append(result.Errors, exec.Errors...)
+			result.Warnings = append(result.Warnings, exec.Warnings...)
+			mergeFreshness(result.Freshness, exec.Freshness)
+			if sf, ok := exec.Meta["signal_funnel"]; ok {
+				if m, ok := sf.(map[string]any); ok {
+					funnel = m
+				}
+			}
+			if rid, ok := exec.Meta["report_id"]; ok {
+				switch v := rid.(type) {
+				case uint64:
+					reportID = v
+				case int:
+					if v > 0 {
+						reportID = uint64(v)
+					}
+				case float64:
+					if v > 0 {
+						reportID = uint64(v)
+					}
+				}
+			}
+			now := time.Now().UTC()
+			s.persistCycleStep(ctx, result.SessionID, step, exec, stepErr, now, now)
+
+			history = append(history, map[string]any{
+				"step":     stepNo,
+				"tool":     step.Tool,
+				"status":   exec.Status,
+				"on_fail":  step.OnFail,
+				"errors":   exec.Errors,
+				"warnings": exec.Warnings,
+				"records":  exec.Records,
+				"summary":  action.Summary,
+				"step_error": func() string {
+					if stepErr == nil {
+						return ""
+					}
+					return stepErr.Error()
+				}(),
+			})
+			if stepErr != nil && strings.EqualFold(step.OnFail, "abort") {
+				result.Status = cycleStatusError
+				break
+			}
+			if stepErr != nil && result.Status == cycleStatusOK {
+				result.Status = cycleStatusDegraded
+			}
+			stepNo++
+		}
+
+		ensureStep := func(tool, why string) {
+			for _, st := range executedSteps {
+				if strings.EqualFold(st.Tool, tool) {
+					return
+				}
+			}
+			step := cyclePlanStep{
+				Step:   len(executedSteps) + 1,
+				Tool:   tool,
+				Why:    why,
+				Args:   map[string]any{},
+				OnFail: "continue",
+			}
+			executedSteps = append(executedSteps, step)
+			exec, stepErr := s.executePlanStep(ctx, step, options, result, funnel)
+			result.ToolCalls++
+			result.Records = append(result.Records, exec.Records...)
+			result.Errors = append(result.Errors, exec.Errors...)
+			result.Warnings = append(result.Warnings, exec.Warnings...)
+			mergeFreshness(result.Freshness, exec.Freshness)
+			if rid, ok := exec.Meta["report_id"]; ok {
+				if v, ok := rid.(uint64); ok {
+					reportID = v
+				}
+			}
+			now := time.Now().UTC()
+			s.persistCycleStep(ctx, result.SessionID, step, exec, stepErr, now, now)
+		}
+		ensureStep("report.generate", "persist cycle summary for ops and memory")
+		ensureStep("report.validate.write", "validate cycle value and write structured verdict")
+
+		plan = cyclePlanOutput{
+			CycleGoal: "vertex-controlled execution",
+			Decision:  result.Decision,
+			Reasoning: "vertex brain loop with tool feedback",
+			Plan:      executedSteps,
+		}
+
+		if result.Decision == "skip" && result.Status == cycleStatusOK {
+			result.Status = cycleStatusSkipped
+		}
+		if result.Status == cycleStatusOK && len(result.Errors) > 0 {
+			result.Status = cycleStatusDegraded
+		}
+		result.FinishedAt = time.Now().UTC()
+		result.DurationMS = result.FinishedAt.Sub(result.StartedAt).Milliseconds()
+		s.persistCycleSession(ctx, result, input, promptBundle.Version, plan, funnel)
+		s.persistCycleMemory(ctx, result, plan, funnel)
+		s.finalizeCycleReport(ctx, reportID, result, funnel)
+		s.observeCycleMetrics(result, fallbackReason)
+		return result, nil
+	}
+
+	var modelName string
+	plan, modelName, fallbackReason = s.buildPlan(ctx, input, promptBundle.System, result)
 	plan = appendMandatoryStep(plan, cyclePlanStep{
 		Tool:            "report.validate.write",
 		Why:             "validate cycle value and write structured verdict",

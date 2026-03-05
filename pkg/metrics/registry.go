@@ -18,25 +18,27 @@ type Registry struct {
 	path    string
 	reg     *prometheus.Registry
 
-	jobRunsTotal            *prometheus.CounterVec
-	jobDurationSeconds      *prometheus.HistogramVec
-	jobErrorsTotal          *prometheus.CounterVec
-	jobInflight             *prometheus.GaugeVec
-	jobLastSuccessTimestamp *prometheus.GaugeVec
-	jobLastErrorTimestamp   *prometheus.GaugeVec
-	jobNextRunTimestamp     *prometheus.GaugeVec
-	jobConsecutiveFailures  *prometheus.GaugeVec
-	fetchRecordsTotal       *prometheus.CounterVec
-	dataFreshnessSeconds    *prometheus.GaugeVec
-	chainRPCRequestsTotal   *prometheus.CounterVec
-	chainRPCDurationSeconds *prometheus.HistogramVec
-	chainRPCRequestsPerSec  *prometheus.GaugeVec
-	agentCycleRunsTotal     *prometheus.CounterVec
-	agentCycleDuration      *prometheus.HistogramVec
-	agentCycleLLMCalls      prometheus.Histogram
-	agentCycleToolErrors    *prometheus.CounterVec
-	agentCycleFallbackTotal *prometheus.CounterVec
-	agentMemoryHitTotal     prometheus.Counter
+	jobRunsTotal                 *prometheus.CounterVec
+	jobDurationSeconds           *prometheus.HistogramVec
+	jobErrorsTotal               *prometheus.CounterVec
+	jobInflight                  *prometheus.GaugeVec
+	jobLastSuccessTimestamp      *prometheus.GaugeVec
+	jobLastErrorTimestamp        *prometheus.GaugeVec
+	jobNextRunTimestamp          *prometheus.GaugeVec
+	jobConsecutiveFailures       *prometheus.GaugeVec
+	schedulerConsecutiveFailures *prometheus.GaugeVec
+	fetchRecordsTotal            *prometheus.CounterVec
+	dataFreshnessSeconds         *prometheus.GaugeVec
+	fetchDataFreshnessSeconds    *prometheus.GaugeVec
+	chainRPCRequestsTotal        *prometheus.CounterVec
+	chainRPCDurationSeconds      *prometheus.HistogramVec
+	chainRPCRequestsPerSec       *prometheus.GaugeVec
+	agentCycleRunsTotal          *prometheus.CounterVec
+	agentCycleDuration           *prometheus.HistogramVec
+	agentCycleLLMCalls           prometheus.Histogram
+	agentCycleToolErrors         *prometheus.CounterVec
+	agentCycleFallbackTotal      *prometheus.CounterVec
+	agentMemoryHitTotal          prometheus.Counter
 
 	cacheMu               sync.RWMutex
 	dataFreshnessSnapshot map[string]float64
@@ -110,6 +112,12 @@ func New(cfg config.MetricsConfig) *Registry {
 			Name:      "job_consecutive_failures",
 			Help:      "Consecutive failure count for each scheduler job.",
 		}, []string{"job"}),
+		schedulerConsecutiveFailures: prometheus.NewGaugeVec(prometheus.GaugeOpts{
+			Namespace: "sky_alpha",
+			Subsystem: "scheduler",
+			Name:      "consecutive_failures",
+			Help:      "Deprecated alias of scheduler job consecutive failures.",
+		}, []string{"job"}),
 		fetchRecordsTotal: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Namespace: "sky_alpha",
 			Subsystem: "fetch",
@@ -179,6 +187,12 @@ func New(cfg config.MetricsConfig) *Registry {
 			Name:      "freshness_seconds",
 			Help:      "Dataset freshness in seconds.",
 		}, []string{"dataset"}),
+		fetchDataFreshnessSeconds: prometheus.NewGaugeVec(prometheus.GaugeOpts{
+			Namespace: "sky_alpha",
+			Subsystem: "fetch",
+			Name:      "data_freshness_seconds",
+			Help:      "Deprecated alias of dataset freshness in seconds.",
+		}, []string{"dataset"}),
 		dataFreshnessSnapshot: make(map[string]float64),
 		chainRPCSecState:      make(map[string]rpcSecState),
 	}
@@ -194,6 +208,7 @@ func New(cfg config.MetricsConfig) *Registry {
 		r.jobLastErrorTimestamp,
 		r.jobNextRunTimestamp,
 		r.jobConsecutiveFailures,
+		r.schedulerConsecutiveFailures,
 		r.fetchRecordsTotal,
 		r.chainRPCRequestsTotal,
 		r.chainRPCDurationSeconds,
@@ -205,6 +220,7 @@ func New(cfg config.MetricsConfig) *Registry {
 		r.agentCycleFallbackTotal,
 		r.agentMemoryHitTotal,
 		r.dataFreshnessSeconds,
+		r.fetchDataFreshnessSeconds,
 	)
 	return r
 }
@@ -272,6 +288,7 @@ func (r *Registry) SetJobConsecutiveFailures(job string, n float64) {
 		return
 	}
 	r.jobConsecutiveFailures.WithLabelValues(job).Set(n)
+	r.schedulerConsecutiveFailures.WithLabelValues(job).Set(n)
 }
 
 func (r *Registry) AddJobError(job, errorCode string, n int) {
@@ -327,6 +344,7 @@ func (r *Registry) SetDataFreshness(dataset string, seconds float64) {
 		return
 	}
 	r.dataFreshnessSeconds.WithLabelValues(dataset).Set(seconds)
+	r.fetchDataFreshnessSeconds.WithLabelValues(dataset).Set(seconds)
 	r.cacheMu.Lock()
 	r.dataFreshnessSnapshot[dataset] = seconds
 	r.cacheMu.Unlock()
