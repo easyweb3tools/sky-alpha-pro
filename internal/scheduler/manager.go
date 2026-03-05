@@ -200,6 +200,9 @@ func (m *Manager) Register(job Job) {
 	m.jobsMu.Lock()
 	m.jobs = append(m.jobs, j)
 	m.jobsMu.Unlock()
+	if m.metrics != nil {
+		m.metrics.InitSchedulerJob(job.Name)
+	}
 }
 
 func (m *Manager) Start(ctx context.Context) {
