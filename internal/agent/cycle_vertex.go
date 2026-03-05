@@ -105,6 +105,15 @@ type cycleValidationOutput struct {
 	Actions   []string `json:"actions"`
 }
 
+type cycleActionOutput struct {
+	Decision string         `json:"decision"`
+	Tool     string         `json:"tool"`
+	Args     map[string]any `json:"args"`
+	Why      string         `json:"why"`
+	OnFail   string         `json:"on_fail"`
+	Summary  string         `json:"summary"`
+}
+
 const cycleValidationSystemPrompt = `You are Sky Alpha Pro's cycle validator.
 Assess one completed cycle and return strict JSON only:
 verdict, score, summary, strengths, risks, actions.
@@ -172,6 +181,79 @@ func minInt(a, b int) int {
 		return a
 	}
 	return b
+}
+
+const cycleActionSystemPrompt = `You are Sky Alpha Pro's brain loop controller.
+Given runtime context and step history, decide the NEXT single tool call.
+Return strict JSON only:
+decision, tool, args, why, on_fail, summary.
+Rules:
+1) decision must be call_tool or finish.
+2) Use one tool per turn.
+3) Keep args minimal and valid.
+4) Prefer tools in this list:
+market.sync.batch, market.city.resolve.batch, market.cities.active,
+weather.forecast.batch, signal.generate.batch, chain.scan.batch,
+report.generate, report.validate.write.
+5) End with finish when no more useful actions remain.`
+
+func (v *vertexAIClient) NextCycleAction(ctx context.Context, input cyclePromptInput, history []map[string]any, step, maxSteps int) (*cycleActionOutput, error) {
+	if v == nil || v.client == nil {
+		return nil, fmt.Errorf("vertex ai client is not configured")
+	}
+	callCtx := ctx
+	cancel := func() {}
+	if v.timeout > 0 {
+		callCtx, cancel = context.WithTimeout(ctx, v.timeout)
+	}
+	defer cancel()
+
+	body, err := json.Marshal(map[string]any{
+		"step":      step,
+		"max_steps": maxSteps,
+		"context":   input,
+		"history":   history,
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	resp, err := v.client.Models.GenerateContent(
+		callCtx,
+		v.model,
+		genai.Text("Cycle control input JSON:\n"+string(body)+"\n\nReturn strict JSON only."),
+		&genai.GenerateContentConfig{
+			SystemInstruction: genai.NewContentFromText(cycleActionSystemPrompt, genai.RoleUser),
+			Temperature:       genai.Ptr(float32(0.1)),
+			MaxOutputTokens:   int32(minInt(v.maxOutputTokens, 1024)),
+			ResponseMIMEType:  "application/json",
+		},
+	)
+	if err != nil {
+		return nil, err
+	}
+	text := strings.TrimSpace(resp.Text())
+	if text == "" {
+		return nil, fmt.Errorf("vertex ai returned empty action")
+	}
+	text = extractJSONObject(text)
+	var out cycleActionOutput
+	if err := json.Unmarshal([]byte(text), &out); err != nil {
+		return nil, fmt.Errorf("decode cycle action json: %w", err)
+	}
+	out.Decision = strings.ToLower(strings.TrimSpace(out.Decision))
+	if out.Decision == "" {
+		out.Decision = "finish"
+	}
+	out.Tool = strings.TrimSpace(out.Tool)
+	out.OnFail = strings.ToLower(strings.TrimSpace(out.OnFail))
+	if out.OnFail == "" {
+		out.OnFail = "continue"
+	}
+	if out.Args == nil {
+		out.Args = map[string]any{}
+	}
+	return &out, nil
 }
 
 func extractJSONObject(raw string) string {
