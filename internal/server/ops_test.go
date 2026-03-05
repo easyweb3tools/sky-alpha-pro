@@ -257,3 +257,17 @@ func TestOpsAgentValidationsHandlerAuth(t *testing.T) {
 		t.Fatalf("expected 200 with valid token, got %d", w2.Code)
 	}
 }
+
+func TestOpsInspectionHandlerWithoutDB(t *testing.T) {
+	gin.SetMode(gin.ReleaseMode)
+
+	r := gin.New()
+	r.GET("/ops/inspection", OpsInspectionHandler(nil, nil, nil))
+
+	req := httptest.NewRequest(http.MethodGet, "/ops/inspection", nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected 503 without db, got %d", w.Code)
+	}
+}
