@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -269,5 +270,69 @@ func TestOpsInspectionHandlerWithoutDB(t *testing.T) {
 	r.ServeHTTP(w, req)
 	if w.Code != http.StatusServiceUnavailable {
 		t.Fatalf("expected 503 without db, got %d", w.Code)
+	}
+}
+
+func TestFillSpecFillTrend(t *testing.T) {
+	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{
+		Logger: logger.Default.LogMode(logger.Silent),
+	})
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	if err := db.AutoMigrate(&model.SchedulerRun{}); err != nil {
+		t.Fatalf("migrate scheduler_runs: %v", err)
+	}
+
+	now := time.Now().UTC()
+	rows := []model.SchedulerRun{
+		{
+			JobName:    "market_spec_fill",
+			Status:     "success",
+			StartedAt:  now.Add(-2 * time.Hour),
+			FinishedAt: now.Add(-2*time.Hour + 10*time.Second),
+		},
+		{
+			JobName:    "market_spec_fill",
+			Status:     "error",
+			StartedAt:  now.Add(-90 * time.Minute),
+			FinishedAt: now.Add(-90*time.Minute + 10*time.Second),
+		},
+		{
+			JobName:    "market_spec_fill",
+			Status:     "skipped_no_input",
+			StartedAt:  now.Add(-30 * time.Minute),
+			FinishedAt: now.Add(-30*time.Minute + 10*time.Second),
+		},
+		{
+			JobName:    "market_sync",
+			Status:     "success",
+			StartedAt:  now.Add(-30 * time.Minute),
+			FinishedAt: now.Add(-30*time.Minute + 10*time.Second),
+		},
+	}
+	if err := db.Create(&rows).Error; err != nil {
+		t.Fatalf("seed scheduler_runs: %v", err)
+	}
+
+	out := inspectionSpecFillTrend{
+		WindowHours: 24,
+		Hourly:      make([]inspectionSpecFillHourAgg, 0),
+	}
+	if err := fillSpecFillTrend(context.Background(), db, &out); err != nil {
+		t.Fatalf("fill trend: %v", err)
+	}
+
+	if out.Runs24H != 3 {
+		t.Fatalf("expected runs_24h=3, got %d", out.Runs24H)
+	}
+	if out.Success24H != 1 || out.Error24H != 1 || out.Skipped24H != 1 {
+		t.Fatalf("unexpected counters: %+v", out)
+	}
+	if out.SuccessRate24H != 0.3333 {
+		t.Fatalf("expected success_rate_24h=0.3333, got %.4f", out.SuccessRate24H)
+	}
+	if len(out.Hourly) == 0 {
+		t.Fatalf("expected non-empty hourly trend")
 	}
 }

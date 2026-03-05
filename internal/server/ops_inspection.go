@@ -27,6 +27,7 @@ type opsInspectionResponse struct {
 	SchedulerLedger  inspectionLedger          `json:"scheduler_ledger"`
 	DataSnapshot     inspectionDataSnapshot    `json:"data_snapshot"`
 	ValueDashboard   inspectionValueDashboard  `json:"value_dashboard"`
+	SpecFillTrend    inspectionSpecFillTrend   `json:"spec_fill_trend"`
 	Profitability    profitabilityConclusion   `json:"profitability"`
 	ValidationStatus inspectionValidationStats `json:"validation_status"`
 	Alerts           []inspectionAlert         `json:"alerts"`
@@ -86,6 +87,25 @@ type inspectionValueDashboard struct {
 	LatestSkipped           int64   `json:"latest_skipped"`
 }
 
+type inspectionSpecFillTrend struct {
+	WindowHours    int                         `json:"window_hours"`
+	Runs24H        int64                       `json:"runs_24h"`
+	Success24H     int64                       `json:"success_24h"`
+	Error24H       int64                       `json:"error_24h"`
+	Skipped24H     int64                       `json:"skipped_24h"`
+	SuccessRate24H float64                     `json:"success_rate_24h"`
+	Hourly         []inspectionSpecFillHourAgg `json:"hourly"`
+}
+
+type inspectionSpecFillHourAgg struct {
+	Hour        string  `json:"hour"`
+	Runs        int64   `json:"runs"`
+	Success     int64   `json:"success"`
+	Error       int64   `json:"error"`
+	Skipped     int64   `json:"skipped"`
+	SuccessRate float64 `json:"success_rate"`
+}
+
 type profitabilityConclusion struct {
 	HealthReady bool   `json:"health_ready"`
 	ValueReady  bool   `json:"value_ready"`
@@ -134,6 +154,10 @@ func OpsInspectionHandler(db *gorm.DB, metricReg *metrics.Registry, schedulerMgr
 				LastUpdated: map[string]*string{},
 			},
 			ValueDashboard: inspectionValueDashboard{},
+			SpecFillTrend: inspectionSpecFillTrend{
+				WindowHours: 24,
+				Hourly:      make([]inspectionSpecFillHourAgg, 0),
+			},
 			Profitability: profitabilityConclusion{
 				HealthReady: false,
 				ValueReady:  false,
@@ -169,6 +193,12 @@ func OpsInspectionHandler(db *gorm.DB, metricReg *metrics.Registry, schedulerMgr
 		if err := fillInspectionValidationStats(c.Request.Context(), db, &resp.ValidationStatus); err != nil {
 			c.JSON(http.StatusServiceUnavailable, gin.H{
 				"error": gin.H{"code": "OPS_VALIDATION_STATS_FAILED", "message": err.Error()},
+			})
+			return
+		}
+		if err := fillSpecFillTrend(c.Request.Context(), db, &resp.SpecFillTrend); err != nil {
+			c.JSON(http.StatusServiceUnavailable, gin.H{
+				"error": gin.H{"code": "OPS_SPEC_FILL_TREND_FAILED", "message": err.Error()},
 			})
 			return
 		}
@@ -407,6 +437,66 @@ func fillInspectionValidationStats(ctx context.Context, db *gorm.DB, out *inspec
 	out.LastScore = row.Score
 	ts := row.CreatedAt.UTC().Format(time.RFC3339)
 	out.LastAt = &ts
+	return nil
+}
+
+func fillSpecFillTrend(ctx context.Context, db *gorm.DB, out *inspectionSpecFillTrend) error {
+	cutoff := time.Now().UTC().Add(-24 * time.Hour)
+
+	type runRow struct {
+		StartedAt time.Time `gorm:"column:started_at"`
+		Status    string    `gorm:"column:status"`
+	}
+	var rows []runRow
+	if err := db.WithContext(ctx).
+		Table("scheduler_runs").
+		Select("started_at, status").
+		Where("job_name = ? AND started_at >= ?", "market_spec_fill", cutoff).
+		Order("started_at ASC").
+		Scan(&rows).Error; err != nil {
+		return err
+	}
+
+	hourlyMap := make(map[string]*inspectionSpecFillHourAgg, 24)
+	for _, row := range rows {
+		out.Runs24H++
+		hourKey := row.StartedAt.UTC().Format("2006-01-02T15:00:00Z")
+		hour, ok := hourlyMap[hourKey]
+		if !ok {
+			hour = &inspectionSpecFillHourAgg{Hour: hourKey}
+			hourlyMap[hourKey] = hour
+		}
+		hour.Runs++
+
+		status := strings.ToLower(strings.TrimSpace(row.Status))
+		switch {
+		case status == "success":
+			out.Success24H++
+			hour.Success++
+		case status == "error" || status == "timeout":
+			out.Error24H++
+			hour.Error++
+		case strings.HasPrefix(status, "skipped"):
+			out.Skipped24H++
+			hour.Skipped++
+		default:
+			out.Error24H++
+			hour.Error++
+		}
+	}
+	if out.Runs24H > 0 {
+		out.SuccessRate24H = roundTo(float64(out.Success24H)/float64(out.Runs24H), 4)
+	}
+	out.Hourly = out.Hourly[:0]
+	for _, item := range hourlyMap {
+		if item.Runs > 0 {
+			item.SuccessRate = roundTo(float64(item.Success)/float64(item.Runs), 4)
+		}
+		out.Hourly = append(out.Hourly, *item)
+	}
+	sort.Slice(out.Hourly, func(i, j int) bool {
+		return out.Hourly[i].Hour < out.Hourly[j].Hour
+	})
 	return nil
 }
 
