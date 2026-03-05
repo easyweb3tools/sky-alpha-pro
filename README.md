@@ -1,400 +1,232 @@
 # Sky Alpha Pro
 
-Week 1 bootstrap for the MVP backend:
+AI-driven autonomous trading system for Polymarket weather prediction markets.
 
-- project skeleton
-- config system (`viper`)
-- structured logging (`zap`)
-- PostgreSQL connection (`gorm`)
-- schema management via GORM `AutoMigrate`
+> Vertex AI decides. Go executes. Data closes the loop.
 
-Week 2 delivery:
+---
 
-- API server entry command: `serve`
-- health check endpoint: `GET /health` and `GET /api/v1/health`
-- request logging middleware (method/path/status/latency/ip/user-agent)
+## Architecture
 
-Week 3 delivery:
+```text
+┌─────────────────────────────────────┐
+│     Scheduler (Go)                  │  Trigger + lifecycle + budget
+└──────────────┬──────────────────────┘
+               ▼
+┌─────────────────────────────────────┐
+│     Vertex AI Control Plane         │  Plan / decide / adapt / validate
+└──────────────┬──────────────────────┘
+               ▼  MCP tool-calling
+┌─────────────────────────────────────┐
+│     Go MCP Runtime (Passive)        │  market / weather / signal / trade
+└──────────────┬──────────────────────┘
+               ▼
+┌─────────────────────────────────────┐
+│     PostgreSQL + Metrics            │  State / results / evidence
+└─────────────────────────────────────┘
+```
 
-- Polymarket Gamma/CLOB read-only integration
-- market sync task: `market sync` and `POST /api/v1/markets/sync`
-- market query API: `GET /api/v1/markets`
-- market and price snapshots persisted into PostgreSQL (`markets`, `market_prices`)
-
-Week 4 delivery:
-
-- NWS / Open-Meteo / Visual Crossing integration
-- normalized weather forecast and observation model
-- weather APIs: `GET /api/v1/weather/forecast`, `GET /api/v1/weather/observation/:station`
-- weather CLI: `weather forecast`, `weather observe`
-
-Week 5 delivery:
-
-- probability model v1 (temperature market probability estimation)
-- edge calculation (`our_estimate - market_price`)
-- signal generation and persistence (`signals` table)
-- forecast target date uses `market.end_date - 1 day` (settlement-day alignment)
-- stale forecast filtering (default: within 24h)
-- per-market per-day signal de-duplication (update existing daily signal)
-- signal APIs: `GET /api/v1/signals`, `POST /api/v1/signals/generate`
-- signal CLI: `signal generate`, `signal list`
-
-Week 6 delivery:
-
-- Agent analysis service with tool-call trace (`get_market_prices`, `get_weather_forecast`, `calculate_edge`)
-- Agent decision log persistence into `agent_logs`
-- agent APIs: `POST /api/v1/agent/analyze`, `GET /api/v1/agent/signals`, `GET /api/v1/agent/signals/:id`
-- agent CLI: `agent analyze`, `agent signals`
-
-Week 7 delivery:
-
-- EIP-712 order signing support
-- CLOB order submit/cancel integration (`POST /order`, `DELETE /order/:id`)
-- server-side risk checks (edge/liquidity/position size/open positions/daily loss/duplicate cooldown)
-- trade error code mapping (`400/422/502/500`) for better caller handling
-- trade APIs: `POST /api/v1/trades`, `DELETE /api/v1/trades/:id`, `GET /api/v1/trades`, `GET /api/v1/trades/:id`
-- trade CLI: `trade buy`, `trade sell`, `trade cancel`, `trade list`
-
-Week 8 delivery:
-
-- position tracking API: `GET /api/v1/positions`
-- PnL report API: `GET /api/v1/pnl`
-- trade CLI: `trade positions`, `trade pnl`
-- trade list API/CLI supports `status` + `market_id` filters
-
-Week 9 delivery:
-
-- Polygon chain scan service for competitor activity bootstrap
-- competitor persistence and bot classification (`competitors`, `competitor_trades`)
-- chain APIs:
-  - `POST /api/v1/chain/scan`
-  - `GET /api/v1/chain/competitors`
-  - `GET /api/v1/chain/competitors/:address`
-  - `GET /api/v1/chain/competitors/:address/trades`
-- chain CLI: `chain scan`, `chain bots`, `chain watch`
-
-Week 10 delivery:
-
-- player tracking service based on tracked on-chain activity
-- player ranking and position snapshots persisted into `players`, `player_positions`
-- player APIs:
-  - `POST /api/v1/players/sync`
-  - `GET /api/v1/players`
-  - `GET /api/v1/players/leaderboard`
-  - `GET /api/v1/players/:address`
-  - `GET /api/v1/players/:address/positions`
-  - `GET /api/v1/players/:address/compare`
-- player CLI: `player sync`, `player list`, `player show`, `player leaderboard`, `player compare`
-
-## MVP Database Rule
-
-MVP 阶段数据库表结构统一由 GORM `AutoMigrate` 管理：
-
-- 不使用 SQL migration 文件
-- 不保留 `migrations/` 目录
-- 通过更新 `internal/model` 下的 GORM model 并执行 `db migrate` 生效
+- **Control Plane** — Vertex AI (`vertex_brain` mode) or deterministic fallback
+- **Execution Plane** — Go services exposed as passive tools
+- **Fact Plane** — PostgreSQL (`markets`, `forecasts`, `signals`, `trades`, `agent_*`)
 
 ## Quick Start
 
+### Prerequisites
+
+- Go 1.22+
+- PostgreSQL 16+
+- Google Cloud credentials (for Vertex AI)
+
+### Local Development
+
 ```bash
+cp .env.example .env    # Edit with your credentials
 make tidy
 make build
-make run
-```
-
-## Database Migration
-
-```bash
 make db-migrate
+make run                # Starts server with scheduler
 ```
 
-## API Health Check
-
-Start server:
+### Docker
 
 ```bash
-go run ./cmd/sky-alpha-pro serve --config ./configs/config.yaml
+docker compose up
 ```
 
-Check health:
+Starts PostgreSQL + application. To include the local Postgres container:
 
 ```bash
-curl http://127.0.0.1:8080/health
-curl http://127.0.0.1:8080/api/v1/health
+docker compose --profile with-postgres up
 ```
-
-## Market Sync (W3)
-
-Before first sync:
-
-```bash
-make db-migrate
-```
-
-Sync markets from Gamma/CLOB:
-
-```bash
-make market-sync
-# or run as a periodic task
-go run ./cmd/sky-alpha-pro market sync --interval 5m --config ./configs/config.yaml
-```
-
-List synced markets:
-
-```bash
-go run ./cmd/sky-alpha-pro market list --config ./configs/config.yaml
-```
-
-REST API:
-
-```bash
-curl -X POST http://127.0.0.1:8080/api/v1/markets/sync
-curl "http://127.0.0.1:8080/api/v1/markets?active=true&limit=20"
-```
-
-## Weather Query (W4)
-
-CLI:
-
-```bash
-go run ./cmd/sky-alpha-pro weather forecast "New York, NY" --source all --days 5
-go run ./cmd/sky-alpha-pro weather observe KNYC
-```
-
-REST API:
-
-```bash
-curl "http://127.0.0.1:8080/api/v1/weather/forecast?location=40.7829,-73.9654&source=all&days=5"
-curl "http://127.0.0.1:8080/api/v1/weather/observation/KNYC"
-```
-
-## Signal Generation (W5)
-
-Generate signals in batch:
-
-```bash
-go run ./cmd/sky-alpha-pro signal generate --limit 100
-```
-
-List latest signals:
-
-```bash
-go run ./cmd/sky-alpha-pro signal list --limit 20 --min-edge 5
-```
-
-REST API:
-
-```bash
-curl -X POST "http://127.0.0.1:8080/api/v1/signals/generate?limit=100"
-curl "http://127.0.0.1:8080/api/v1/signals?limit=20&min_edge=5"
-```
-
-## Agent Analysis (W6)
-
-Analyze one market:
-
-```bash
-go run ./cmd/sky-alpha-pro agent analyze <market_id>
-```
-
-Analyze active markets:
-
-```bash
-go run ./cmd/sky-alpha-pro agent analyze --all --limit 20 --depth full
-```
-
-List agent signals:
-
-```bash
-go run ./cmd/sky-alpha-pro agent signals --limit 20 --min-edge 5
-```
-
-REST API:
-
-```bash
-curl -X POST http://127.0.0.1:8080/api/v1/agent/analyze \
-  -H "Content-Type: application/json" \
-  -d '{"market_id":"<market_id>","depth":"full"}'
-curl "http://127.0.0.1:8080/api/v1/agent/signals?limit=20&min_edge=5"
-```
-
-Vertex AI (Gemini via Go SDK) config:
-
-```yaml
-agent:
-  vertex_project: "your-gcp-project-id"
-  vertex_location: "us-central1"
-  vertex_model: "gemini-2.5-flash"
-  vertex_temperature: 0.2
-  vertex_max_output_tokens: 600
-  vertex_timeout: 15s
-```
-
-Agent analysis now defaults to Vertex AI (`google.golang.org/genai`, `BackendVertexAI`).
-If Vertex initialization or request fails, the service degrades to deterministic rule-based reasoning for continuity.
-`agent.vertex_project` is required and must be configured in YAML (project no longer depends on `GOOGLE_CLOUD_PROJECT`/`GOOGLE_CLOUD_LOCATION` env vars).
-Credentials use Google ADC (recommended: attach a service account on GCE/Cloud Run; local dev can use `gcloud auth application-default login`).
-
-## Trade Execution (W7)
-
-CLI:
-
-```bash
-go run ./cmd/sky-alpha-pro trade buy <market_id> --outcome YES --price 0.65 --size 10 --confirm
-go run ./cmd/sky-alpha-pro trade sell <market_id> --outcome NO --price 0.42 --size 8 --confirm
-go run ./cmd/sky-alpha-pro trade cancel <trade_id>
-go run ./cmd/sky-alpha-pro trade list --limit 20 --status placed --market-id <market_id>
-go run ./cmd/sky-alpha-pro trade positions --market-id <market_id>
-go run ./cmd/sky-alpha-pro trade pnl --from 2026-02-01 --to 2026-02-28
-```
-
-REST API:
-
-```bash
-curl -X POST http://127.0.0.1:8080/api/v1/trades \
-  -H "Content-Type: application/json" \
-  -d '{"market_id":"<market_id>","side":"BUY","outcome":"YES","price":0.65,"size":10,"confirm":true}'
-curl "http://127.0.0.1:8080/api/v1/trades?limit=20&status=placed&market_id=<market_id>"
-curl "http://127.0.0.1:8080/api/v1/trades/1"
-curl -X DELETE "http://127.0.0.1:8080/api/v1/trades/1"
-curl "http://127.0.0.1:8080/api/v1/positions?market_id=<market_id>"
-curl "http://127.0.0.1:8080/api/v1/pnl?from=2026-02-01&to=2026-02-28"
-```
-
-Required config:
-
-```yaml
-trade:
-  private_key: "<hex_private_key>"
-  chain_id: 137
-  max_order_size: 0 # 0 disables the limit
-  confirmation_required: true
-```
-
-`private_key` 仅建议通过安全的环境变量/密钥管理系统注入，不要写入版本控制文件。
-当前实现已对齐 CTF Exchange 的 EIP-712 订单结构；若直连真实 CLOB，还需要配置 `POLY_*` 认证头（API key/secret/passphrase）链路。
-
-Chain scan config:
-
-```yaml
-chain:
-  rpc_url: "https://polygon-rpc.com"
-  chain_id: 137
-  ctf_exchange_address: "0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E"
-  negrisk_exchange_address: "0xC5d563A36AE78145C45a50134d48A1215220f80a"
-  scan_lookback_blocks: 2000
-  scan_max_tx: 2000
-  bot_min_trades: 8
-  bot_max_avg_interval_sec: 8.0
-  watch_interval: 30s
-```
-
-## Chain Scan (W9)
-
-CLI:
-
-```bash
-go run ./cmd/sky-alpha-pro chain scan --lookback-blocks 2000
-go run ./cmd/sky-alpha-pro chain bots --limit 20
-go run ./cmd/sky-alpha-pro chain bots --address 0xabc... --trades --trades-limit 30
-go run ./cmd/sky-alpha-pro chain watch --interval 30s
-```
-
-REST API:
-
-```bash
-curl -X POST http://127.0.0.1:8080/api/v1/chain/scan \
-  -H "Content-Type: application/json" \
-  -d '{"lookback_blocks":2000,"max_tx":2000}'
-curl "http://127.0.0.1:8080/api/v1/chain/competitors?only_bots=true&limit=20"
-curl "http://127.0.0.1:8080/api/v1/chain/competitors/0xabc..."
-curl "http://127.0.0.1:8080/api/v1/chain/competitors/0xabc.../trades?limit=50"
-```
-
-## Player Tracking (W10)
-
-`players` 数据由 `player sync` 显式触发构建；读接口不会隐式触发同步。
-当前 MVP 仅可靠聚合 `total_volume`（总成交额），`total_pnl` 暂不从链上活动推断。
-
-CLI:
-
-```bash
-go run ./cmd/sky-alpha-pro player sync --limit 50
-go run ./cmd/sky-alpha-pro player list --limit 20
-go run ./cmd/sky-alpha-pro player show 0xabc... --positions-limit 20
-go run ./cmd/sky-alpha-pro player leaderboard --type weather --limit 20
-go run ./cmd/sky-alpha-pro player compare 0xabc...
-```
-
-REST API:
-
-```bash
-curl -X POST "http://127.0.0.1:8080/api/v1/players/sync?limit=50"
-curl "http://127.0.0.1:8080/api/v1/players?limit=20"
-curl "http://127.0.0.1:8080/api/v1/players/leaderboard?type=weather&limit=20"
-curl "http://127.0.0.1:8080/api/v1/players/0xabc..."
-curl "http://127.0.0.1:8080/api/v1/players/0xabc.../positions?limit=20"
-curl "http://127.0.0.1:8080/api/v1/players/0xabc.../compare"
-```
-
-## Stability & Integration (W11)
-
-- `market sync`、`chain scan`、`chain watch` 增加了指数退避重试（默认最多 3 次），用于吸收短时网络/RPC 抖动。
-- `chain watch` 保留了单周期超时控制，并在可重试故障上自动重试后再进入下一轮。
-- 新增关键链路 API 集成测试：`signals/generate -> agent/analyze -> signals/list`。
-
-## Auto Scheduler & Metrics
-
-- `serve` 启动后会自动拉起内置 scheduler（默认开启）：
-  - `market_sync`（5m）
-  - `weather_forecast`（15m）
-  - `chain_scan`（2m，若 `chain.rpc_url` 为空则自动跳过注册）
-  - `sim_cycle`（默认关闭；开启后仅执行 paper trade，且默认跳过市场同步）
-- 指标端点默认：`GET /metrics`
-  - 关键指标包括：
-    - `sky_alpha_scheduler_job_runs_total{job,status}`
-    - `sky_alpha_scheduler_job_duration_seconds{job,status}`
-    - `sky_alpha_scheduler_job_last_success_timestamp_seconds{job}`
-    - `sky_alpha_fetch_records_total{job,entity,result}`
-- 相关配置见：
-  - `scheduler.*`
-  - `metrics.*`
-  - `.env.example` 中 `SKY_ALPHA_SCHEDULER_*` / `SKY_ALPHA_METRICS_*`
-- 锁说明：
-  - 当前版本仅实现 `scheduler.lock_mode=local`（单实例进程内锁）
-  - 多实例 `postgres_advisory` 计划在后续阶段补齐
-
-验证命令：
-
-```bash
-make test-w11
-```
-
-稳定性报告：
-
-- [W11 关键链路稳定性报告](docs/W11-关键链路稳定性报告.md)
-
-## Container
-
-```bash
-docker compose up --build
-```
-
-`docker-compose.yml` 默认会启动 PostgreSQL + 应用服务（`serve`）。
-
-## CI Image Build
-
-- GitHub Actions 工作流文件：`.github/workflows/release-image.yml`
-- 当 `release/v*` 分支发生代码变更时，自动构建并推送镜像到 GHCR
-- 版本号从分支名动态提取（例如 `release/v1.2.3` -> `1.2.3`），并生成动态标签：`<version>-build.<run_number>`
 
 ## Configuration
 
-Default config file path lookup order:
+Config is loaded from YAML + environment variables (prefix `SKY_ALPHA_`).
 
-1. `--config <path>`
-2. `./config.yaml`
-3. `./configs/config.yaml`
-4. `$HOME/config.yaml`
+Lookup order: `--config <path>` → `./config.yaml` → `./configs/config.yaml`
 
-Environment variable prefix is `SKY_ALPHA_`. See `.env.example`.
+Key config files:
+- `configs/config.yaml` — base configuration
+- `.env` — secrets and overrides (see `.env.example`)
+
+### Required Settings
+
+| Setting | Description |
+|---------|-------------|
+| `SKY_ALPHA_AGENT_VERTEX_PROJECT` | GCP project ID for Vertex AI |
+| `DB_PASSWORD` | PostgreSQL password |
+| `SKY_ALPHA_CHAIN_RPC_URL` | Polygon RPC URL (for chain scan) |
+
+### Signal Tuning
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `SKY_ALPHA_SIGNAL_MIN_EDGE_PCT` | `5.0` | Minimum raw edge % to generate signal |
+| `SKY_ALPHA_SIGNAL_FORECAST_MAX_AGE_HOURS` | `24` | Max forecast age before considered stale |
+| `SKY_ALPHA_SIGNAL_MIN_SIGMA` | `0.5` | Minimum standard deviation floor |
+
+## Scheduler Jobs
+
+The `serve` command automatically starts the scheduler. Jobs:
+
+| Job | Default Interval | Description |
+|-----|-----------------|-------------|
+| `market_sync` | 5m | Sync weather markets from Polymarket Gamma/CLOB |
+| `market_spec_fill` | 10m | Resolve city/threshold/comparator for active markets |
+| `weather_forecast` | 15m | Fetch forecasts from NWS, Open-Meteo, Visual Crossing |
+| `chain_scan` | 2m | Scan Polygon for competitor OrderFilled events |
+| `agent_cycle` | 10m | Vertex AI-driven analysis → signal → trade cycle |
+| `sim_cycle` | 5m | Paper trading simulation (disabled by default) |
+
+## Opportunity Pipeline
+
+```text
+Gamma API → Markets DB → City Resolution → Weather Forecast → Signal Generation → Edge Filter → Trade
+```
+
+Each market goes through a funnel:
+
+1. **Market Sync** — Fetch active weather markets from Polymarket
+2. **Spec Fill** — Resolve city, temperature threshold, comparator from question text
+3. **Weather Forecast** — Pull forecasts from 3 sources (NWS, Open-Meteo, Visual Crossing)
+4. **Signal Generation** — Estimate probability via normal CDF model, compute `edge_exec`
+5. **Edge Filter** — Require `|edge| >= min_edge_pct` after friction deduction
+6. **Agent Decision** — Vertex AI evaluates signals and decides to trade or hold
+
+## API Reference
+
+### Health & Ops
+
+```bash
+GET  /health                    # Health check
+GET  /ops/status                # Scheduler status
+GET  /ops/inspection            # Full system inspection (replaces manual SQL)
+GET  /ops/agent/validations     # Agent cycle validation history
+```
+
+### Markets
+
+```bash
+GET  /api/v1/markets            # List markets (?active=true&limit=20)
+POST /api/v1/markets/sync       # Trigger market sync
+```
+
+### Weather
+
+```bash
+GET  /api/v1/weather/forecast           # ?location=NYC&source=all&days=5
+GET  /api/v1/weather/observation/:station  # e.g. /observation/KNYC
+```
+
+### Signals
+
+```bash
+GET  /api/v1/signals                    # ?limit=20&min_edge=5
+POST /api/v1/signals/generate           # ?limit=100
+```
+
+### Agent
+
+```bash
+POST /api/v1/agent/analyze              # {"market_id":"...","depth":"full"}
+GET  /api/v1/agent/signals              # ?limit=20&min_edge=5
+GET  /api/v1/agent/signals/:id
+```
+
+### Trading
+
+```bash
+POST   /api/v1/trades                   # Submit order
+GET    /api/v1/trades                   # ?limit=20&status=placed&market_id=...
+GET    /api/v1/trades/:id
+DELETE /api/v1/trades/:id               # Cancel order
+GET    /api/v1/positions                # ?market_id=...
+GET    /api/v1/pnl                      # ?from=2026-02-01&to=2026-02-28
+```
+
+### Chain & Players
+
+```bash
+POST /api/v1/chain/scan                           # Trigger chain scan
+GET  /api/v1/chain/competitors                    # ?only_bots=true&limit=20
+GET  /api/v1/chain/competitors/:address/trades    # ?limit=50
+POST /api/v1/players/sync                         # ?limit=50
+GET  /api/v1/players/leaderboard                  # ?type=weather&limit=20
+```
+
+### Metrics
+
+```bash
+GET  /metrics                   # Prometheus metrics
+```
+
+## CLI Commands
+
+```bash
+sky-alpha-pro serve                          # Start API server + scheduler
+sky-alpha-pro market sync                    # Sync markets
+sky-alpha-pro market list                    # List markets
+sky-alpha-pro weather forecast "NYC"         # Get forecast
+sky-alpha-pro weather observe KNYC           # Get observation
+sky-alpha-pro signal generate --limit 100    # Generate signals
+sky-alpha-pro signal list --min-edge 5       # List signals
+sky-alpha-pro agent analyze --all            # AI analysis
+sky-alpha-pro trade buy <market> --outcome YES --price 0.65 --size 10 --confirm
+sky-alpha-pro trade list --status placed
+sky-alpha-pro trade positions
+sky-alpha-pro trade pnl --from 2026-02-01
+sky-alpha-pro chain scan --lookback-blocks 2000
+sky-alpha-pro chain bots --limit 20
+sky-alpha-pro player leaderboard --type weather
+```
+
+## Database
+
+Schema managed by GORM `AutoMigrate` (no SQL migration files):
+
+```bash
+make db-migrate
+```
+
+Key tables: `markets`, `market_prices`, `forecasts`, `signals`, `signal_runs`, `trades`, `competitors`, `competitor_trades`, `players`, `player_positions`, `city_resolution_caches`, `agent_*`
+
+## CI/CD
+
+- **GitHub Actions**: `.github/workflows/release-image.yml`
+- Trigger: push to `release/v*` branch
+- Output: Docker image to GHCR with tag `<version>-build.<run_number>`
+
+## Tech Stack
+
+| Component | Technology |
+|-----------|------------|
+| Language | Go 1.22 |
+| AI | Google Vertex AI (Gemini) |
+| Database | PostgreSQL 16 |
+| ORM | GORM |
+| Config | Viper |
+| Logging | Zap |
+| Metrics | Prometheus |
+| Blockchain | go-ethereum (Polygon) |
+| Container | Docker Compose |

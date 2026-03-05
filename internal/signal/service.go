@@ -142,6 +142,9 @@ func NewService(cfg config.SignalConfig, db *gorm.DB, log *zap.Logger) *Service 
 }
 
 func (s *Service) GenerateSignals(ctx context.Context, opts GenerateOptions) (*GenerateResult, error) {
+	// Keep signal generation deterministic and low-cost; reserve Vertex city resolution
+	// for dedicated spec-fill workflows.
+	ctx = WithCityResolverVertexDisabled(ctx)
 	startedAt := time.Now().UTC()
 	limit := opts.Limit
 	if limit <= 0 {
@@ -272,6 +275,8 @@ func (s *Service) ListSignals(ctx context.Context, opts ListOptions) ([]SignalVi
 }
 
 func (s *Service) GenerateSignalForMarketID(ctx context.Context, marketRef string) (*SignalView, error) {
+	// Keep single-market generation deterministic and low-cost.
+	ctx = WithCityResolverVertexDisabled(ctx)
 	market, err := s.LoadMarketByRef(ctx, marketRef)
 	if err != nil {
 		return nil, err
@@ -698,7 +703,21 @@ func normalizeCityToken(city string) string {
 	if v == "" {
 		return ""
 	}
-	return strings.Join(strings.Fields(v), " ")
+	v = strings.Join(strings.Fields(v), " ")
+	return canonicalCityAlias(v)
+}
+
+func canonicalCityAlias(city string) string {
+	token := strings.TrimSpace(strings.ToLower(city))
+	if token == "" {
+		return ""
+	}
+	for _, alias := range defaultCityAliases {
+		if token == alias.Alias {
+			return alias.City
+		}
+	}
+	return token
 }
 
 func marketForecastDate(endDate time.Time) (time.Time, error) {

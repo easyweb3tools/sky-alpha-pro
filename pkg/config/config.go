@@ -265,7 +265,7 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("weather.request_timeout", "12s")
 	v.SetDefault("weather.user_agent", "sky-alpha-pro/0.1.0")
 
-	v.SetDefault("signal.min_edge_pct", 5.0)
+	v.SetDefault("signal.min_edge_pct", 2.5)
 	v.SetDefault("signal.min_edge_exec_pct", 2.0)
 	v.SetDefault("signal.exec_fee_pct", 0.2)
 	v.SetDefault("signal.exec_slippage_pct", 0.3)
@@ -348,11 +348,11 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("scheduler.jobs.sim_cycle.timeout", "120s")
 	v.SetDefault("scheduler.jobs.sim_cycle.immediate", false)
 
-	v.SetDefault("scheduler.jobs.agent_cycle.enabled", false)
+	v.SetDefault("scheduler.jobs.agent_cycle.enabled", true)
 	v.SetDefault("scheduler.jobs.agent_cycle.interval", "10m")
 	v.SetDefault("scheduler.jobs.agent_cycle.timeout", "120s")
 	v.SetDefault("scheduler.jobs.agent_cycle.immediate", false)
-	v.SetDefault("scheduler.jobs.agent_cycle.run_mode", "observe")
+	v.SetDefault("scheduler.jobs.agent_cycle.run_mode", "vertex_brain")
 	v.SetDefault("scheduler.jobs.agent_cycle.trade_enabled", false)
 	v.SetDefault("scheduler.jobs.agent_cycle.max_tool_calls", 12)
 	v.SetDefault("scheduler.jobs.agent_cycle.max_external_requests", 200)
