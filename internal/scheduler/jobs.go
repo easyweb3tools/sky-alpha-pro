@@ -16,6 +16,7 @@ import (
 	"sky-alpha-pro/internal/chain"
 	"sky-alpha-pro/internal/market"
 	"sky-alpha-pro/internal/model"
+	"sky-alpha-pro/internal/opportunity"
 	"sky-alpha-pro/internal/signal"
 	"sky-alpha-pro/internal/sim"
 	"sky-alpha-pro/internal/weather"
@@ -25,6 +26,11 @@ import (
 func RegisterDefaultJobs(mgr *Manager, cfg *config.Config, db *gorm.DB, marketSvc *market.Service, signalSvc *signal.Service, weatherSvc *weather.Service, chainSvc *chain.Service, simSvc *sim.Service, agentSvc *agent.Service, log *zap.Logger) {
 	if mgr == nil || cfg == nil {
 		return
+	}
+	var oppSvc *opportunity.Service
+	if db != nil {
+		oppSvc = opportunity.NewService(db)
+		oppSvc.SetMetrics(mgr.metrics)
 	}
 
 	mc := cfg.Scheduler.Jobs.MarketSync
@@ -124,16 +130,60 @@ func RegisterDefaultJobs(mgr *Manager, cfg *config.Config, db *gorm.DB, marketSv
 						Count:   len(res.Errors),
 					})
 				}
+				if oppSvc != nil {
+					readyChanged := 0
+					for _, item := range res.Items {
+						prev := strings.TrimSpace(strings.ToLower(item.PrevStatus))
+						next := strings.TrimSpace(strings.ToLower(item.Status))
+						if prev == next {
+							continue
+						}
+						if next == "ready" {
+							readyChanged++
+							_ = oppSvc.Emit(ctx, opportunity.EmitInput{
+								EventType: "spec_ready_changed",
+								MarketID:  item.MarketID,
+								Severity:  "info",
+								DedupKey:  fmt.Sprintf("spec_ready_changed:%s:%s", item.MarketID, next),
+								Payload: map[string]any{
+									"prev_status": prev,
+									"next_status": next,
+									"city":        item.City,
+									"source":      item.Source,
+									"confidence":  item.Confidence,
+								},
+								OccurredAt: time.Now().UTC(),
+							})
+						}
+					}
+					if readyChanged > 0 {
+						out.Records = append(out.Records, FetchRecord{Entity: "spec_ready_changed_events", Result: "success", Count: readyChanged})
+					}
+				}
 				if db != nil && mgr != nil && mgr.metrics != nil {
-					var activeTotal int64
+					var rows []model.Market
+					_ = db.WithContext(ctx).Model(&model.Market{}).
+						Select("id, market_type, question, city, spec_status").
+						Where("is_active = ?", true).
+						Find(&rows).Error
+					var supportedTotal int64
 					var specReady int64
 					var cityMissing int64
-					_ = db.WithContext(ctx).Table("markets").Where("is_active = ?", true).Count(&activeTotal).Error
-					_ = db.WithContext(ctx).Table("markets").Where("is_active = ? AND spec_status = 'ready'", true).Count(&specReady).Error
-					_ = db.WithContext(ctx).Table("markets").Where("is_active = ? AND COALESCE(city,'') = ''", true).Count(&cityMissing).Error
+					for _, row := range rows {
+						if !signal.IsSupportedMarketForSignal(row) {
+							continue
+						}
+						supportedTotal++
+						if strings.EqualFold(strings.TrimSpace(row.SpecStatus), "ready") {
+							specReady++
+						}
+						if strings.TrimSpace(row.City) == "" {
+							cityMissing++
+						}
+					}
 					successRate := 0.0
-					if activeTotal > 0 {
-						successRate = float64(specReady) / float64(activeTotal)
+					if supportedTotal > 0 {
+						successRate = float64(specReady) / float64(supportedTotal)
 					}
 					mgr.metrics.SetMarketSpecCoverage(float64(specReady), float64(cityMissing), successRate)
 				}
@@ -215,6 +265,24 @@ func RegisterDefaultJobs(mgr *Manager, cfg *config.Config, db *gorm.DB, marketSv
 				if successCity == 0 && failedCity > 0 {
 					return JobResult{}, fmt.Errorf("weather forecast failed for all %d cities", failedCity)
 				}
+				if oppSvc != nil && successCity > 0 {
+					for _, city := range cities {
+						c := strings.TrimSpace(strings.ToLower(city))
+						if c == "" {
+							continue
+						}
+						var marketIDs []string
+						if err := db.WithContext(ctx).Table("markets").
+							Select("id").
+							Where("is_active = ? AND LOWER(COALESCE(city,'')) = ?", true, c).
+							Pluck("id", &marketIDs).Error; err != nil {
+							continue
+						}
+						for _, mid := range marketIDs {
+							_ = oppSvc.EmitMarketEvent(ctx, "forecast_update", mid, "info", map[string]any{"city": c})
+						}
+					}
+				}
 
 				out := JobResult{
 					Records: []FetchRecord{
@@ -284,6 +352,18 @@ func RegisterDefaultJobs(mgr *Manager, cfg *config.Config, db *gorm.DB, marketSv
 				if err != nil {
 					return JobResult{}, err
 				}
+				if oppSvc != nil && res.InsertedTrades > 0 {
+					_ = oppSvc.Emit(ctx, opportunity.EmitInput{
+						EventType: "chain_activity_spike",
+						Severity:  "info",
+						Payload: map[string]any{
+							"inserted_trades":  res.InsertedTrades,
+							"observed_tx":      res.ObservedTx,
+							"duplicate_trades": res.DuplicateTrades,
+						},
+						OccurredAt: time.Now().UTC(),
+					})
+				}
 				return JobResult{
 					Records: []FetchRecord{
 						{Entity: "observed_logs", Result: "success", Count: res.ObservedLogs},
@@ -326,6 +406,228 @@ func RegisterDefaultJobs(mgr *Manager, cfg *config.Config, db *gorm.DB, marketSv
 		})
 	}
 
+	oc := cfg.Scheduler.Jobs.OpportunityCycle
+	if oc.Enabled && oc.Interval > 0 && oppSvc != nil {
+		mgr.Register(Job{
+			Name:      "opportunity_cycle",
+			Interval:  oc.Interval,
+			Timeout:   oc.Timeout,
+			Immediate: oc.Immediate,
+			Run: func(ctx context.Context) (JobResult, error) {
+				cycleStarted := time.Now().UTC()
+				cycleID := fmt.Sprintf("opcycle-%s", cycleStarted.Format("20060102T150405Z"))
+				cycleRow := model.AgentEventCycle{
+					CycleID:   cycleID,
+					RunMode:   strings.TrimSpace(oc.AgentRunMode),
+					Status:    "running",
+					StartedAt: cycleStarted,
+				}
+				if cycleRow.RunMode == "" {
+					cycleRow.RunMode = "event_driven"
+				}
+				if db != nil {
+					_ = db.WithContext(ctx).Create(&cycleRow).Error
+				}
+				finalized := false
+				finalizeCycle := func(status, code, msg string, eventsConsumed, candidatesSelected, signalsGenerated int, firstEventAt, firstSignalAt *time.Time) {
+					if finalized {
+						return
+					}
+					if db == nil || cycleRow.ID == 0 {
+						return
+					}
+					finished := time.Now().UTC()
+					_ = db.WithContext(ctx).Model(&model.AgentEventCycle{}).Where("id = ?", cycleRow.ID).Updates(map[string]any{
+						"status":              status,
+						"error_code":          code,
+						"error_message":       msg,
+						"events_consumed":     eventsConsumed,
+						"candidates_selected": candidatesSelected,
+						"signals_generated":   signalsGenerated,
+						"first_event_at":      firstEventAt,
+						"first_signal_at":     firstSignalAt,
+						"finished_at":         finished,
+					}).Error
+					finalized = true
+				}
+				expiryEvents := 0
+				expiryEmitErr := error(nil)
+				if db != nil {
+					n, emitErr := emitExpiryWindowEvents(ctx, db, oppSvc, cycleStarted)
+					if emitErr != nil {
+						expiryEmitErr = emitErr
+					}
+					expiryEvents = n
+				}
+
+				consumed, firstEventAt, err := oppSvc.ConsumePending(ctx, oc.ConsumeLimit)
+				if err != nil {
+					finalizeCycle("error", "consume_pending_failed", err.Error(), 0, 0, 0, nil, nil)
+					return JobResult{}, err
+				}
+				decayed, err := oppSvc.DecayCandidates(ctx, oc.DecayWatchAfter, oc.DecayCooldownAfter)
+				if err != nil {
+					finalizeCycle("error", "decay_candidates_failed", err.Error(), consumed, 0, 0, firstEventAt, nil)
+					return JobResult{}, err
+				}
+				recomputed, err := oppSvc.RecomputeCandidateScores(ctx, opportunity.ScoreWeights{
+					EdgeRefPct:      oc.ScoreEdgeRefPct,
+					WeightEdge:      oc.ScoreWeightEdge,
+					WeightLiquidity: oc.ScoreWeightLiquidity,
+					WeightFreshness: oc.ScoreWeightFreshness,
+					WeightExpiry:    oc.ScoreWeightExpiry,
+					FreshnessMaxAge: oc.ScoreFreshnessMaxAge,
+				})
+				if err != nil {
+					finalizeCycle("error", "recompute_candidate_scores_failed", err.Error(), consumed, 0, 0, firstEventAt, nil)
+					return JobResult{}, err
+				}
+				out := JobResult{
+					Records: []FetchRecord{
+						{Entity: "events_consumed", Result: "success", Count: consumed},
+						{Entity: "candidates_decayed", Result: "success", Count: decayed},
+						{Entity: "candidates_recomputed", Result: "success", Count: recomputed},
+						{Entity: "expiry_window_events", Result: "success", Count: expiryEvents},
+					},
+					Freshness: map[string]float64{"events": 0},
+				}
+				if expiryEmitErr != nil {
+					out.Warnings = append(out.Warnings, JobIssue{
+						Code:    "opportunity_expiry_window_emit_failed",
+						Message: expiryEmitErr.Error(),
+						Source:  "opportunity_cycle",
+						Count:   1,
+					})
+				}
+				if oc.TriggerAgent && agentSvc != nil {
+					ids, topErr := oppSvc.SelectCandidateMarketIDs(ctx, oc.AgentCandidateLimit, oc.AgentMaxHotMarkets)
+					if topErr != nil {
+						out.Warnings = append(out.Warnings, JobIssue{
+							Code:    "opportunity_top_candidates_failed",
+							Message: topErr.Error(),
+							Source:  "opportunity_cycle",
+							Count:   1,
+						})
+						finalizeCycle("degraded", "top_candidates_failed", topErr.Error(), consumed, 0, 0, firstEventAt, nil)
+						return out, nil
+					}
+					minCandidates := oc.AgentMinCandidates
+					if minCandidates <= 0 {
+						minCandidates = 1
+					}
+					minConsumed := oc.AgentMinConsumedEvents
+					if minConsumed <= 0 {
+						minConsumed = 1
+					}
+					if consumed < minConsumed {
+						out.Records = append(out.Records, FetchRecord{Entity: "agent_cycles_triggered", Result: "skipped", Count: 1})
+						out.Warnings = append(out.Warnings, JobIssue{
+							Code:    "opportunity_agent_gate_events",
+							Message: fmt.Sprintf("skip agent trigger: consumed=%d below min_consumed=%d", consumed, minConsumed),
+							Source:  "opportunity_cycle",
+							Count:   1,
+						})
+						finalizeCycle("success", "", "", consumed, len(ids), 0, firstEventAt, nil)
+						return out, nil
+					}
+					if len(ids) < minCandidates {
+						out.Records = append(out.Records, FetchRecord{Entity: "agent_cycles_triggered", Result: "skipped", Count: 1})
+						out.Warnings = append(out.Warnings, JobIssue{
+							Code:    "opportunity_agent_gate_candidates",
+							Message: fmt.Sprintf("skip agent trigger: candidates=%d below min_candidates=%d", len(ids), minCandidates),
+							Source:  "opportunity_cycle",
+							Count:   1,
+						})
+						finalizeCycle("success", "", "", consumed, len(ids), 0, firstEventAt, nil)
+						return out, nil
+					}
+					if len(ids) > 0 {
+						marketLimit := len(ids)
+						if cfg.Scheduler.Jobs.AgentCycle.MarketLimit > 0 && marketLimit > cfg.Scheduler.Jobs.AgentCycle.MarketLimit {
+							marketLimit = cfg.Scheduler.Jobs.AgentCycle.MarketLimit
+						}
+						runMode := strings.TrimSpace(oc.AgentRunMode)
+						if runMode == "" {
+							runMode = cfg.Scheduler.Jobs.AgentCycle.RunMode
+						}
+						actx := signal.WithCandidateMarketIDs(ctx, ids)
+						actx = signal.WithSignalWriteLimit(actx, oc.MaxSignalWritesPerCycle)
+						var signalBefore *time.Time
+						if db != nil {
+							var t time.Time
+							if err := db.WithContext(ctx).Table("signals").Select("MAX(created_at)").Scan(&t).Error; err == nil && !t.IsZero() {
+								tmp := t.UTC()
+								signalBefore = &tmp
+							}
+						}
+						res, runErr := agentSvc.RunCycle(actx, agent.CycleOptions{
+							RunMode:             runMode,
+							TradeEnabled:        cfg.Scheduler.Jobs.AgentCycle.TradeEnabled,
+							MaxToolCalls:        cfg.Scheduler.Jobs.AgentCycle.MaxToolCalls,
+							MaxExternalRequests: cfg.Scheduler.Jobs.AgentCycle.MaxExternalRequests,
+							MaxTokensPerCycle:   cfg.Scheduler.Jobs.AgentCycle.MaxTokensPerCycle,
+							MaxCycleDurationSec: int(cfg.Scheduler.Jobs.AgentCycle.MaxCycleDuration.Seconds()),
+							MemoryWindow:        cfg.Scheduler.Jobs.AgentCycle.MemoryWindow,
+							MarketLimit:         marketLimit,
+						})
+						if runErr != nil {
+							out.Warnings = append(out.Warnings, JobIssue{
+								Code:    "opportunity_agent_cycle_failed",
+								Message: runErr.Error(),
+								Source:  "opportunity_cycle",
+								Count:   1,
+							})
+							if mgr != nil && mgr.metrics != nil {
+								mgr.metrics.SetHotMarketHitRate(0)
+							}
+							finalizeCycle("degraded", "agent_cycle_failed", runErr.Error(), consumed, len(ids), 0, firstEventAt, nil)
+						} else {
+							signalCount := 0
+							for _, rec := range res.Records {
+								if rec.Entity == "signals_generated" && rec.Count > 0 {
+									signalCount = rec.Count
+									break
+								}
+							}
+							out.Records = append(out.Records,
+								FetchRecord{Entity: "agent_cycles_triggered", Result: "success", Count: 1},
+								FetchRecord{Entity: "agent_candidates_selected", Result: "success", Count: len(ids)},
+								FetchRecord{Entity: "agent_signals_generated", Result: "success", Count: signalCount},
+							)
+							if mgr != nil && mgr.metrics != nil {
+								hitRate := 0.0
+								if len(ids) > 0 {
+									hitRate = float64(signalCount) / float64(len(ids))
+								}
+								mgr.metrics.SetHotMarketHitRate(hitRate)
+							}
+							var firstSignalAt *time.Time
+							if db != nil && signalCount > 0 {
+								var t time.Time
+								q := db.WithContext(ctx).Table("signals").Select("MIN(created_at)")
+								if signalBefore != nil {
+									q = q.Where("created_at > ?", *signalBefore)
+								} else {
+									q = q.Where("created_at >= ?", cycleStarted)
+								}
+								if err := q.Scan(&t).Error; err == nil && !t.IsZero() {
+									tmp := t.UTC()
+									firstSignalAt = &tmp
+								}
+							}
+							if mgr != nil && mgr.metrics != nil && firstEventAt != nil && firstSignalAt != nil && firstSignalAt.After(*firstEventAt) {
+								mgr.metrics.ObserveTriggerToSignalLatency(firstSignalAt.Sub(*firstEventAt))
+							}
+							finalizeCycle("success", "", "", consumed, len(ids), signalCount, firstEventAt, firstSignalAt)
+						}
+					}
+				}
+				finalizeCycle("success", "", "", consumed, 0, 0, firstEventAt, nil)
+				return out, nil
+			},
+		})
+	}
+
 	ac := cfg.Scheduler.Jobs.AgentCycle
 	if ac.Enabled && ac.Interval > 0 && agentSvc != nil {
 		mgr.Register(Job{
@@ -339,6 +641,8 @@ func RegisterDefaultJobs(mgr *Manager, cfg *config.Config, db *gorm.DB, marketSv
 					TradeEnabled:        ac.TradeEnabled,
 					MaxToolCalls:        ac.MaxToolCalls,
 					MaxExternalRequests: ac.MaxExternalRequests,
+					MaxTokensPerCycle:   ac.MaxTokensPerCycle,
+					MaxCycleDurationSec: int(ac.MaxCycleDuration.Seconds()),
 					MemoryWindow:        ac.MemoryWindow,
 					MarketLimit:         ac.MarketLimit,
 				})
@@ -357,6 +661,7 @@ func RegisterDefaultJobs(mgr *Manager, cfg *config.Config, db *gorm.DB, marketSv
 					})
 				}
 				out.Records = append(out.Records, FetchRecord{Entity: "llm_calls", Result: "success", Count: res.LLMCalls})
+				out.Records = append(out.Records, FetchRecord{Entity: "llm_tokens", Result: "success", Count: res.LLMTokens})
 				for _, issue := range res.Errors {
 					out.Errors = append(out.Errors, JobIssue{
 						Code:    issue.Code,
@@ -536,6 +841,59 @@ func matchCitiesFromQuestion(
 		citySet[c.city] = struct{}{}
 		*cities = append(*cities, c.city)
 	}
+}
+
+func emitExpiryWindowEvents(ctx context.Context, db *gorm.DB, sink *opportunity.Service, now time.Time) (int, error) {
+	if db == nil || sink == nil {
+		return 0, nil
+	}
+	type row struct {
+		ID      string    `gorm:"column:id"`
+		EndDate time.Time `gorm:"column:end_date"`
+	}
+	var markets []row
+	if err := db.WithContext(ctx).
+		Model(&model.Market{}).
+		Select("id, end_date").
+		Where("is_active = ?", true).
+		Where("COALESCE(spec_status, '') = ?", "ready").
+		Where("end_date > ?", now).
+		Where("end_date <= ?", now.Add(24*time.Hour)).
+		Limit(500).
+		Find(&markets).Error; err != nil {
+		return 0, err
+	}
+	emitted := 0
+	for _, m := range markets {
+		delta := m.EndDate.Sub(now)
+		window := ""
+		switch {
+		case delta <= 2*time.Hour:
+			window = "2h"
+		case delta <= 6*time.Hour:
+			window = "6h"
+		case delta <= 24*time.Hour:
+			window = "24h"
+		default:
+			continue
+		}
+		bucket := now.UTC().Truncate(30 * time.Minute)
+		if err := sink.Emit(ctx, opportunity.EmitInput{
+			EventType:  "expiry_window_entered",
+			MarketID:   m.ID,
+			Severity:   "info",
+			DedupKey:   fmt.Sprintf("expiry_window_entered:%s:%s:%s", m.ID, window, bucket.Format("200601021504")),
+			OccurredAt: bucket,
+			Payload: map[string]any{
+				"window":         window,
+				"seconds_to_end": int(delta.Seconds()),
+				"end_date":       m.EndDate.UTC().Format(time.RFC3339),
+			},
+		}); err == nil {
+			emitted++
+		}
+	}
+	return emitted, nil
 }
 
 func normalizeCity(v string) string {

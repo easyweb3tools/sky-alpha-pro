@@ -56,6 +56,8 @@ type CycleOptions struct {
 	TradeEnabled        bool   `json:"trade_enabled"`
 	MaxToolCalls        int    `json:"max_tool_calls"`
 	MaxExternalRequests int    `json:"max_external_requests"`
+	MaxTokensPerCycle   int    `json:"max_tokens_per_cycle"`
+	MaxCycleDurationSec int    `json:"max_cycle_duration_sec"`
 	MemoryWindow        int    `json:"memory_window"`
 	MarketLimit         int    `json:"market_limit"`
 }
@@ -69,14 +71,25 @@ type CycleResult struct {
 	SkipReason string             `json:"skip_reason,omitempty"`
 	Model      string             `json:"model,omitempty"`
 	LLMCalls   int                `json:"llm_calls"`
+	LLMTokens  int                `json:"llm_tokens"`
 	ToolCalls  int                `json:"tool_calls"`
 	Records    []CycleRecord      `json:"records"`
 	Errors     []CycleIssue       `json:"errors,omitempty"`
 	Warnings   []CycleIssue       `json:"warnings,omitempty"`
 	Freshness  map[string]float64 `json:"freshness,omitempty"`
+	BrainTrace []CycleStateEvent  `json:"brain_trace,omitempty"`
 	StartedAt  time.Time          `json:"started_at"`
 	FinishedAt time.Time          `json:"finished_at"`
 	DurationMS int64              `json:"duration_ms"`
+}
+
+type CycleStateEvent struct {
+	State     string    `json:"state"`
+	At        time.Time `json:"at"`
+	StepNo    int       `json:"step_no,omitempty"`
+	Tool      string    `json:"tool,omitempty"`
+	Message   string    `json:"message,omitempty"`
+	ErrorCode string    `json:"error_code,omitempty"`
 }
 
 type CycleRecord struct {

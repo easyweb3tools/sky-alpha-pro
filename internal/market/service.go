@@ -19,6 +19,7 @@ import (
 	"gorm.io/gorm/clause"
 
 	"sky-alpha-pro/internal/model"
+	"sky-alpha-pro/internal/signal"
 	"sky-alpha-pro/pkg/config"
 )
 
@@ -28,11 +29,16 @@ var marketThresholdPattern = regexp.MustCompile(`(?i)(?:above|below|over|under|e
 var marketLooseThresholdPattern = regexp.MustCompile(`(?i)(-?\d+(?:\.\d+)?)\s*°?\s*([FC])`)
 
 type Service struct {
-	cfg   config.MarketConfig
-	db    *gorm.DB
-	log   *zap.Logger
-	gamma *GammaClient
-	clob  *CLOBClient
+	cfg    config.MarketConfig
+	db     *gorm.DB
+	log    *zap.Logger
+	gamma  *GammaClient
+	clob   *CLOBClient
+	events EventSink
+}
+
+type EventSink interface {
+	EmitMarketEvent(ctx context.Context, eventType, marketID, severity string, payload map[string]any) error
 }
 
 func NewService(cfg config.MarketConfig, db *gorm.DB, log *zap.Logger) *Service {
@@ -44,6 +50,10 @@ func NewService(cfg config.MarketConfig, db *gorm.DB, log *zap.Logger) *Service 
 		gamma: NewGammaClient(cfg.GammaBaseURL, httpClient),
 		clob:  NewCLOBClient(cfg.CLOBBaseURL, httpClient),
 	}
+}
+
+func (s *Service) SetEventSink(sink EventSink) {
+	s.events = sink
 }
 
 func (s *Service) SyncMarkets(ctx context.Context) (*SyncResult, error) {
@@ -74,6 +84,13 @@ func (s *Service) SyncMarkets(ctx context.Context) (*SyncResult, error) {
 				mu.Unlock()
 				return nil
 			}
+			if s.events != nil && stored != nil && stored.IsActive {
+				_ = s.events.EmitMarketEvent(gctx, "market_sync_seen", stored.ID, "info", map[string]any{
+					"market_type":         stored.MarketType,
+					"is_signal_supported": stored.IsSignalSupported,
+					"spec_status":         stored.SpecStatus,
+				})
+			}
 
 			priceRow, priceErr, warnings := s.buildPriceSnapshot(gctx, gm, stored.ID)
 			mu.Lock()
@@ -96,6 +113,11 @@ func (s *Service) SyncMarkets(ctx context.Context) (*SyncResult, error) {
 				result.Errors = append(result.Errors, fmt.Sprintf("insert price %s: %v", gm.PolymarketID, err))
 				mu.Unlock()
 				return nil
+			}
+			if s.events != nil && stored != nil {
+				_ = s.events.EmitMarketEvent(gctx, "price_snapshot_updated", stored.ID, "info", map[string]any{
+					"source": priceRow.Source,
+				})
 			}
 
 			mu.Lock()
@@ -350,6 +372,13 @@ func (s *Service) upsertMarket(ctx context.Context, gm GammaMarket) (*model.Mark
 		Comparator:        comparator,
 		WeatherTargetDate: &targetDate,
 		SpecStatus:        specStatus,
+		IsSignalSupported: signal.IsSupportedMarketForSignal(model.Market{
+			Question:   gm.Question,
+			Slug:       gm.Slug,
+			MarketType: normalizeMarketType(gm.MarketType, gm.Question),
+			Comparator: comparator,
+			ThresholdF: thresholdValue,
+		}),
 	}
 
 	err := s.db.WithContext(ctx).
@@ -379,9 +408,10 @@ func (s *Service) upsertMarket(ctx context.Context, gm GammaMarket) (*model.Mark
 				"spec_status": gorm.Expr(`CASE
 					WHEN COALESCE(EXCLUDED.spec_status,'') = 'ready' THEN 'ready'
 					WHEN COALESCE(markets.spec_status,'') = 'ready' THEN 'ready'
-					WHEN COALESCE(EXCLUDED.spec_status,'') = '' THEN markets.spec_status
+					WHEN COALESCE(EXCLUDED.spec_status,'') IN ('','incomplete') AND COALESCE(markets.spec_status,'') <> '' THEN markets.spec_status
 					ELSE EXCLUDED.spec_status
 				END`),
+				"is_signal_supported": upsertRow.IsSignalSupported,
 				"updated_at":          time.Now().UTC(),
 			}),
 		}).

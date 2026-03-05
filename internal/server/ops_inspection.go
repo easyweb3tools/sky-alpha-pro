@@ -3,9 +3,11 @@ package server
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"math"
 	"net/http"
+	"os"
 	"sort"
 	"strings"
 	"time"
@@ -16,22 +18,34 @@ import (
 
 	"sky-alpha-pro/internal/model"
 	"sky-alpha-pro/internal/scheduler"
+	"sky-alpha-pro/internal/signal"
 	"sky-alpha-pro/pkg/metrics"
 )
 
 type opsInspectionResponse struct {
-	Timestamp        time.Time                 `json:"timestamp"`
-	Scheduler        scheduler.ManagerSnapshot `json:"scheduler"`
-	Summary          opsSummary                `json:"summary"`
-	Freshness        map[string]float64        `json:"freshness"`
-	SchedulerLedger  inspectionLedger          `json:"scheduler_ledger"`
-	DataSnapshot     inspectionDataSnapshot    `json:"data_snapshot"`
-	ValueDashboard   inspectionValueDashboard  `json:"value_dashboard"`
-	SpecFillTrend    inspectionSpecFillTrend   `json:"spec_fill_trend"`
-	SpecFillDiag     inspectionSpecFillDiag    `json:"spec_fill_diagnostics"`
-	Profitability    profitabilityConclusion   `json:"profitability"`
-	ValidationStatus inspectionValidationStats `json:"validation_status"`
-	Alerts           []inspectionAlert         `json:"alerts"`
+	Timestamp         time.Time                   `json:"timestamp"`
+	Scheduler         scheduler.ManagerSnapshot   `json:"scheduler"`
+	Summary           opsSummary                  `json:"summary"`
+	Freshness         map[string]float64          `json:"freshness"`
+	SchedulerLedger   inspectionLedger            `json:"scheduler_ledger"`
+	DataSnapshot      inspectionDataSnapshot      `json:"data_snapshot"`
+	ValueDashboard    inspectionValueDashboard    `json:"value_dashboard"`
+	SpecFillTrend     inspectionSpecFillTrend     `json:"spec_fill_trend"`
+	SpecFillDiag      inspectionSpecFillDiag      `json:"spec_fill_diagnostics"`
+	Profitability     profitabilityConclusion     `json:"profitability"`
+	ValidationStatus  inspectionValidationStats   `json:"validation_status"`
+	StrategyEvolution inspectionStrategyEvolution `json:"strategy_evolution"`
+	ParamTuning       inspectionParamTuning       `json:"param_tuning"`
+	PromptRollout     inspectionPromptRollout     `json:"prompt_rollout"`
+	EventPipeline     inspectionEventPipeline     `json:"event_pipeline"`
+	CandidateFunnel   inspectionCandidateFunnel   `json:"candidate_funnel"`
+	OpportunityWin    inspectionOpportunityWin    `json:"opportunity_windows"`
+	VertexBrainBudget inspectionVertexBrainBudget `json:"vertex_brain_budget"`
+	ControlPlane      inspectionControlPlane      `json:"control_plane"`
+	Alerts            []inspectionAlert           `json:"alerts"`
+	ImmediateActions  []string                    `json:"immediate_actions"`
+	H48Actions        []string                    `json:"h48_actions"`
+	Actions           []string                    `json:"actions"`
 }
 
 type inspectionLedger struct {
@@ -89,38 +103,40 @@ type inspectionValueDashboard struct {
 }
 
 type inspectionSpecFillTrend struct {
-	WindowHours    int                         `json:"window_hours"`
-	Runs24H        int64                       `json:"runs_24h"`
-	Success24H     int64                       `json:"success_24h"`
-	Error24H       int64                       `json:"error_24h"`
-	Skipped24H     int64                       `json:"skipped_24h"`
-	SuccessRate24H float64                     `json:"success_rate_24h"`
-	EffectiveSuccess24H     int64              `json:"effective_success_24h"`
-	EffectiveSuccessRate24H float64            `json:"effective_success_rate_24h"`
-	NoProgress24H           int64              `json:"no_progress_24h"`
-	Hourly         []inspectionSpecFillHourAgg `json:"hourly"`
+	WindowHours             int                         `json:"window_hours"`
+	Runs24H                 int64                       `json:"runs_24h"`
+	Success24H              int64                       `json:"success_24h"`
+	Error24H                int64                       `json:"error_24h"`
+	Skipped24H              int64                       `json:"skipped_24h"`
+	SuccessRate24H          float64                     `json:"success_rate_24h"`
+	EffectiveSuccess24H     int64                       `json:"effective_success_24h"`
+	EffectiveSuccessRate24H float64                     `json:"effective_success_rate_24h"`
+	NoProgress24H           int64                       `json:"no_progress_24h"`
+	Hourly                  []inspectionSpecFillHourAgg `json:"hourly"`
 }
 
 type inspectionSpecFillHourAgg struct {
-	Hour        string  `json:"hour"`
-	Runs        int64   `json:"runs"`
-	Success     int64   `json:"success"`
-	Error       int64   `json:"error"`
-	Skipped     int64   `json:"skipped"`
-	SuccessRate float64 `json:"success_rate"`
+	Hour                 string  `json:"hour"`
+	Runs                 int64   `json:"runs"`
+	Success              int64   `json:"success"`
+	Error                int64   `json:"error"`
+	Skipped              int64   `json:"skipped"`
+	SuccessRate          float64 `json:"success_rate"`
 	EffectiveSuccess     int64   `json:"effective_success"`
 	EffectiveSuccessRate float64 `json:"effective_success_rate"`
 	NoProgress           int64   `json:"no_progress"`
 }
 
 type inspectionSpecFillDiag struct {
-	ActiveMarkets       int64            `json:"active_markets"`
-	SpecReady           int64            `json:"spec_ready"`
-	CityMissing         int64            `json:"city_missing"`
-	ThresholdMissing    int64            `json:"threshold_missing"`
-	ComparatorMissing   int64            `json:"comparator_missing"`
-	TargetDateMissing   int64            `json:"target_date_missing"`
-	BySpecStatus        map[string]int64 `json:"by_spec_status"`
+	ActiveMarkets         int64               `json:"active_markets"`
+	SupportedMarkets      int64               `json:"supported_markets"`
+	UnsupportedTopReasons []inspectionGroupKV `json:"unsupported_top_reasons"`
+	SpecReady             int64               `json:"spec_ready"`
+	CityMissing           int64               `json:"city_missing"`
+	ThresholdMissing      int64               `json:"threshold_missing"`
+	ComparatorMissing     int64               `json:"comparator_missing"`
+	TargetDateMissing     int64               `json:"target_date_missing"`
+	BySpecStatus          map[string]int64    `json:"by_spec_status"`
 }
 
 type profitabilityConclusion struct {
@@ -136,10 +152,101 @@ type inspectionValidationStats struct {
 	LastAt      *string `json:"last_at,omitempty"`
 }
 
+type inspectionStrategyEvolution struct {
+	WindowHours         int64   `json:"window_hours"`
+	CandidateVersion    string  `json:"candidate_version,omitempty"`
+	CandidateRolloutPct float64 `json:"candidate_rollout_pct"`
+	Changes24H          int64   `json:"changes_24h"`
+	Monitoring24H       int64   `json:"monitoring_24h"`
+	Kept24H             int64   `json:"kept_24h"`
+	RolledBack24H       int64   `json:"rolled_back_24h"`
+	LastDecision        string  `json:"last_decision,omitempty"`
+	LastReason          string  `json:"last_reason,omitempty"`
+	LastSubject         string  `json:"last_subject,omitempty"`
+	LastUpdatedAt       *string `json:"last_updated_at,omitempty"`
+}
+
+type inspectionPromptRollout struct {
+	WindowHours            int64   `json:"window_hours"`
+	ActiveRuns             int64   `json:"active_runs"`
+	CandidateRuns          int64   `json:"candidate_runs"`
+	ActiveSignalsPerRun    float64 `json:"active_signals_per_run"`
+	CandidateSignalsPerRun float64 `json:"candidate_signals_per_run"`
+	ImprovementPct         float64 `json:"improvement_pct"`
+}
+
+type inspectionParamTuning struct {
+	WindowHours    int64              `json:"window_hours"`
+	ParamsCount    int64              `json:"params_count"`
+	EnabledParams  int64              `json:"enabled_params"`
+	Monitoring24H  int64              `json:"monitoring_24h"`
+	Kept24H        int64              `json:"kept_24h"`
+	RolledBack24H  int64              `json:"rolled_back_24h"`
+	LastDecision   string             `json:"last_decision,omitempty"`
+	LastReason     string             `json:"last_reason,omitempty"`
+	LastUpdatedAt  *string            `json:"last_updated_at,omitempty"`
+	CurrentParams  map[string]float64 `json:"current_params"`
+	CurrentEnabled map[string]bool    `json:"current_enabled"`
+}
+
 type inspectionAlert struct {
 	Code     string `json:"code"`
 	Severity string `json:"severity"`
 	Message  string `json:"message"`
+}
+
+type inspectionEventPipeline struct {
+	WindowHours                     int64   `json:"window_hours"`
+	TotalEvents24                   int64   `json:"total_events_24h"`
+	PendingEvents                   int64   `json:"pending_events"`
+	AgentCycles24                   int64   `json:"agent_cycles_24h"`
+	AgentCycleSuccess24             int64   `json:"agent_cycle_success_24h"`
+	AgentCycleDegraded24            int64   `json:"agent_cycle_degraded_24h"`
+	AgentCycleError24               int64   `json:"agent_cycle_error_24h"`
+	SignalsFromEventCycles24        int64   `json:"signals_from_event_cycles_24h"`
+	TriggerToSignalLatencyAvgSecond float64 `json:"trigger_to_signal_latency_avg_seconds"`
+	TriggerToSignalLatencyP50Second float64 `json:"trigger_to_signal_latency_p50_seconds"`
+	TriggerToSignalLatencyP90Second float64 `json:"trigger_to_signal_latency_p90_seconds"`
+	LastEventAt                     *string `json:"last_event_at,omitempty"`
+}
+
+type inspectionCandidateFunnel struct {
+	Cold     int64 `json:"cold"`
+	Watch    int64 `json:"watch"`
+	Hot      int64 `json:"hot"`
+	Tradable int64 `json:"tradable"`
+	CoolDown int64 `json:"cool_down"`
+}
+
+type inspectionOpportunityWin struct {
+	WindowHours            int64   `json:"window_hours"`
+	TotalCycles24          int64   `json:"total_cycles_24h"`
+	TriggeredCycles24      int64   `json:"triggered_cycles_24h"`
+	CyclesWithSignals24    int64   `json:"cycles_with_signals_24h"`
+	SignalHitRate24        float64 `json:"signal_hit_rate_24h"`
+	AvgSignalsPerTriggered float64 `json:"avg_signals_per_triggered_cycle_24h"`
+}
+
+type inspectionVertexBrainBudget struct {
+	WindowHours               int64   `json:"window_hours"`
+	VertexRuns24              int64   `json:"vertex_runs_24h"`
+	AvgLLMCalls               float64 `json:"avg_llm_calls"`
+	AvgLLMTokens              float64 `json:"avg_llm_tokens"`
+	MaxLLMTokens              int64   `json:"max_llm_tokens"`
+	TokenBudgetExhausted24    int64   `json:"token_budget_exhausted_24h"`
+	DurationBudgetExceeded24  int64   `json:"duration_budget_exceeded_24h"`
+	ExternalBudgetExhausted24 int64   `json:"external_budget_exhausted_24h"`
+	ToolBudgetExhausted24     int64   `json:"tool_budget_exhausted_24h"`
+	PlanDecodeFailed24        int64   `json:"plan_decode_failed_24h"`
+	PlanDecodeFailed1H        int64   `json:"plan_decode_failed_1h"`
+	LastPlanDecodeFailedAt    *string `json:"last_plan_decode_failed_at,omitempty"`
+	BudgetPressureRate24      float64 `json:"budget_pressure_rate_24h"`
+}
+
+type inspectionControlPlane struct {
+	Mode                         string `json:"mode"`
+	LegacyVertexAnalyzeEnabled   bool   `json:"legacy_vertex_analyze_enabled"`
+	LegacyVertexAnalyzeBypass24H int64  `json:"legacy_vertex_analyze_bypass_24h"`
 }
 
 func OpsInspectionHandler(db *gorm.DB, metricReg *metrics.Registry, schedulerMgr *scheduler.Manager) gin.HandlerFunc {
@@ -176,13 +283,40 @@ func OpsInspectionHandler(db *gorm.DB, metricReg *metrics.Registry, schedulerMgr
 				Hourly:      make([]inspectionSpecFillHourAgg, 0),
 			},
 			SpecFillDiag: inspectionSpecFillDiag{
-				BySpecStatus: map[string]int64{},
+				BySpecStatus:          map[string]int64{},
+				UnsupportedTopReasons: make([]inspectionGroupKV, 0),
 			},
 			Profitability: profitabilityConclusion{
 				HealthReady: false,
 				ValueReady:  false,
 			},
-			Alerts: make([]inspectionAlert, 0),
+			Alerts:           make([]inspectionAlert, 0),
+			ImmediateActions: make([]string, 0, 6),
+			H48Actions:       make([]string, 0, 6),
+			Actions:          make([]string, 0, 12),
+			StrategyEvolution: inspectionStrategyEvolution{
+				WindowHours: 24,
+			},
+			ParamTuning: inspectionParamTuning{
+				WindowHours:    24,
+				CurrentParams:  map[string]float64{},
+				CurrentEnabled: map[string]bool{},
+			},
+			PromptRollout: inspectionPromptRollout{
+				WindowHours: 24,
+			},
+			EventPipeline: inspectionEventPipeline{
+				WindowHours: 24,
+			},
+			OpportunityWin: inspectionOpportunityWin{
+				WindowHours: 24,
+			},
+			VertexBrainBudget: inspectionVertexBrainBudget{
+				WindowHours: 24,
+			},
+			ControlPlane: inspectionControlPlane{
+				Mode: "vertex_brain",
+			},
 		}
 		if schedulerMgr != nil {
 			resp.Scheduler = schedulerMgr.Snapshot()
@@ -216,6 +350,54 @@ func OpsInspectionHandler(db *gorm.DB, metricReg *metrics.Registry, schedulerMgr
 			})
 			return
 		}
+		if err := fillInspectionStrategyEvolution(c.Request.Context(), db, &resp.StrategyEvolution); err != nil {
+			c.JSON(http.StatusServiceUnavailable, gin.H{
+				"error": gin.H{"code": "OPS_STRATEGY_EVOLUTION_FAILED", "message": err.Error()},
+			})
+			return
+		}
+		if err := fillInspectionParamTuning(c.Request.Context(), db, &resp.ParamTuning); err != nil {
+			c.JSON(http.StatusServiceUnavailable, gin.H{
+				"error": gin.H{"code": "OPS_PARAM_TUNING_FAILED", "message": err.Error()},
+			})
+			return
+		}
+		if err := fillInspectionPromptRollout(c.Request.Context(), db, &resp.PromptRollout); err != nil {
+			c.JSON(http.StatusServiceUnavailable, gin.H{
+				"error": gin.H{"code": "OPS_PROMPT_ROLLOUT_FAILED", "message": err.Error()},
+			})
+			return
+		}
+		if err := fillInspectionEventPipeline(c.Request.Context(), db, &resp.EventPipeline); err != nil {
+			c.JSON(http.StatusServiceUnavailable, gin.H{
+				"error": gin.H{"code": "OPS_EVENT_PIPELINE_FAILED", "message": err.Error()},
+			})
+			return
+		}
+		if err := fillInspectionCandidateFunnel(c.Request.Context(), db, &resp.CandidateFunnel); err != nil {
+			c.JSON(http.StatusServiceUnavailable, gin.H{
+				"error": gin.H{"code": "OPS_CANDIDATE_FUNNEL_FAILED", "message": err.Error()},
+			})
+			return
+		}
+		if err := fillInspectionOpportunityWindow(c.Request.Context(), db, &resp.OpportunityWin); err != nil {
+			c.JSON(http.StatusServiceUnavailable, gin.H{
+				"error": gin.H{"code": "OPS_OPPORTUNITY_WINDOW_FAILED", "message": err.Error()},
+			})
+			return
+		}
+		if err := fillInspectionVertexBrainBudget(c.Request.Context(), db, &resp.VertexBrainBudget); err != nil {
+			c.JSON(http.StatusServiceUnavailable, gin.H{
+				"error": gin.H{"code": "OPS_VERTEX_BUDGET_FAILED", "message": err.Error()},
+			})
+			return
+		}
+		if err := fillInspectionControlPlane(c.Request.Context(), db, &resp.ControlPlane); err != nil {
+			c.JSON(http.StatusServiceUnavailable, gin.H{
+				"error": gin.H{"code": "OPS_CONTROL_PLANE_FAILED", "message": err.Error()},
+			})
+			return
+		}
 		if err := fillSpecFillTrend(c.Request.Context(), db, &resp.SpecFillTrend); err != nil {
 			c.JSON(http.StatusServiceUnavailable, gin.H{
 				"error": gin.H{"code": "OPS_SPEC_FILL_TREND_FAILED", "message": err.Error()},
@@ -231,6 +413,9 @@ func OpsInspectionHandler(db *gorm.DB, metricReg *metrics.Registry, schedulerMgr
 
 		resp.Profitability = concludeProfitability(resp)
 		resp.Alerts = buildInspectionAlerts(resp)
+		resp.ImmediateActions, resp.H48Actions = buildInspectionActionPlan(resp)
+		resp.Actions = append(resp.Actions, resp.ImmediateActions...)
+		resp.Actions = append(resp.Actions, resp.H48Actions...)
 		c.JSON(http.StatusOK, resp)
 	}
 }
@@ -466,6 +651,434 @@ func fillInspectionValidationStats(ctx context.Context, db *gorm.DB, out *inspec
 	return nil
 }
 
+func fillInspectionStrategyEvolution(ctx context.Context, db *gorm.DB, out *inspectionStrategyEvolution) error {
+	if out.WindowHours <= 0 {
+		out.WindowHours = 24
+	}
+	cutoff := time.Now().UTC().Add(-time.Duration(out.WindowHours) * time.Hour)
+
+	var pv model.PromptVersion
+	if err := db.WithContext(ctx).
+		Where("COALESCE(stage,'') = ? AND COALESCE(rollout_pct,0) > 0", "candidate").
+		Order("updated_at DESC, id DESC").
+		Limit(1).
+		Take(&pv).Error; err == nil {
+		out.CandidateVersion = strings.TrimSpace(pv.Version)
+		out.CandidateRolloutPct = roundTo(pv.RolloutPct, 2)
+	} else if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) && !strings.Contains(strings.ToLower(err.Error()), "does not exist") {
+		return err
+	}
+
+	type agg struct {
+		Changes    int64 `gorm:"column:changes"`
+		Monitoring int64 `gorm:"column:monitoring"`
+		Kept       int64 `gorm:"column:kept"`
+		RolledBack int64 `gorm:"column:rolled_back"`
+	}
+	var stats agg
+	if err := db.WithContext(ctx).
+		Table("agent_strategy_changes").
+		Select(
+			"COUNT(*) AS changes, "+
+				"COALESCE(SUM(CASE WHEN status = 'monitoring' THEN 1 ELSE 0 END),0) AS monitoring, "+
+				"COALESCE(SUM(CASE WHEN status = 'kept' THEN 1 ELSE 0 END),0) AS kept, "+
+				"COALESCE(SUM(CASE WHEN status = 'rolled_back' THEN 1 ELSE 0 END),0) AS rolled_back",
+		).
+		Where("created_at >= ?", cutoff).
+		Scan(&stats).Error; err != nil {
+		if strings.Contains(strings.ToLower(err.Error()), "does not exist") {
+			return nil
+		}
+		return err
+	}
+	out.Changes24H = stats.Changes
+	out.Monitoring24H = stats.Monitoring
+	out.Kept24H = stats.Kept
+	out.RolledBack24H = stats.RolledBack
+
+	var latest model.AgentStrategyChange
+	if err := db.WithContext(ctx).
+		Order("updated_at DESC, id DESC").
+		Limit(1).
+		Take(&latest).Error; err == nil {
+		out.LastDecision = strings.TrimSpace(latest.Decision)
+		out.LastReason = strings.TrimSpace(latest.Reason)
+		out.LastSubject = strings.TrimSpace(latest.Subject)
+		if !latest.UpdatedAt.IsZero() {
+			ts := latest.UpdatedAt.UTC().Format(time.RFC3339)
+			out.LastUpdatedAt = &ts
+		} else if !latest.CreatedAt.IsZero() {
+			ts := latest.CreatedAt.UTC().Format(time.RFC3339)
+			out.LastUpdatedAt = &ts
+		}
+	} else if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) && !strings.Contains(strings.ToLower(err.Error()), "does not exist") {
+		return err
+	}
+	return nil
+}
+
+func fillInspectionParamTuning(ctx context.Context, db *gorm.DB, out *inspectionParamTuning) error {
+	if out == nil {
+		return nil
+	}
+	if out.WindowHours <= 0 {
+		out.WindowHours = 24
+	}
+	if out.CurrentParams == nil {
+		out.CurrentParams = map[string]float64{}
+	}
+	if out.CurrentEnabled == nil {
+		out.CurrentEnabled = map[string]bool{}
+	}
+
+	var params []model.AgentStrategyParam
+	if err := db.WithContext(ctx).
+		Where("scope = ?", "agent_cycle").
+		Order("updated_at DESC, created_at DESC").
+		Find(&params).Error; err != nil {
+		return err
+	}
+	out.ParamsCount = int64(len(params))
+	for _, p := range params {
+		key := strings.TrimSpace(p.Key)
+		if key == "" {
+			continue
+		}
+		out.CurrentParams[key] = p.Value
+		out.CurrentEnabled[key] = p.Enabled
+		if p.Enabled {
+			out.EnabledParams++
+		}
+	}
+
+	cutoff := time.Now().UTC().Add(-time.Duration(out.WindowHours) * time.Hour)
+	var agg struct {
+		Monitoring int64
+		Kept       int64
+		RolledBack int64
+	}
+	err := db.WithContext(ctx).Model(&model.AgentStrategyChange{}).
+		Select(`
+			COUNT(*) FILTER (WHERE status = 'monitoring') AS monitoring,
+			COUNT(*) FILTER (WHERE status = 'kept') AS kept,
+			COUNT(*) FILTER (WHERE status = 'rolled_back') AS rolled_back`).
+		Where("scope = ? AND created_at >= ?", "agent_param_tuning", cutoff).
+		Scan(&agg).Error
+	if err != nil {
+		return err
+	}
+	out.Monitoring24H = agg.Monitoring
+	out.Kept24H = agg.Kept
+	out.RolledBack24H = agg.RolledBack
+
+	var latest model.AgentStrategyChange
+	if err := db.WithContext(ctx).
+		Where("scope = ?", "agent_param_tuning").
+		Order("updated_at DESC, id DESC").
+		Limit(1).
+		Take(&latest).Error; err == nil {
+		out.LastDecision = strings.TrimSpace(latest.Decision)
+		out.LastReason = strings.TrimSpace(latest.Reason)
+		if !latest.UpdatedAt.IsZero() {
+			v := latest.UpdatedAt.UTC().Format(time.RFC3339)
+			out.LastUpdatedAt = &v
+		}
+	} else if !errors.Is(err, gorm.ErrRecordNotFound) {
+		return err
+	}
+	return nil
+}
+
+func fillInspectionPromptRollout(ctx context.Context, db *gorm.DB, out *inspectionPromptRollout) error {
+	if out.WindowHours <= 0 {
+		out.WindowHours = 24
+	}
+	cutoff := time.Now().UTC().Add(-time.Duration(out.WindowHours) * time.Hour)
+	var rows []model.AgentSession
+	if err := db.WithContext(ctx).
+		Where("started_at >= ?", cutoff).
+		Order("started_at DESC").
+		Limit(10000).
+		Find(&rows).Error; err != nil {
+		if strings.Contains(strings.ToLower(err.Error()), "does not exist") {
+			return nil
+		}
+		return err
+	}
+	var activeSignals, candidateSignals int64
+	for _, row := range rows {
+		variant := strings.TrimSpace(strings.ToLower(row.PromptVariant))
+		if variant == "" {
+			variant = "active"
+		}
+		signals := extractSignalsGeneratedFromSummaryForInspection(row.SummaryJSON)
+		switch variant {
+		case "candidate":
+			out.CandidateRuns++
+			candidateSignals += signals
+		default:
+			out.ActiveRuns++
+			activeSignals += signals
+		}
+	}
+	if out.ActiveRuns > 0 {
+		out.ActiveSignalsPerRun = roundTo(float64(activeSignals)/float64(out.ActiveRuns), 4)
+	}
+	if out.CandidateRuns > 0 {
+		out.CandidateSignalsPerRun = roundTo(float64(candidateSignals)/float64(out.CandidateRuns), 4)
+	}
+	if out.ActiveSignalsPerRun > 0 {
+		out.ImprovementPct = roundTo((out.CandidateSignalsPerRun-out.ActiveSignalsPerRun)/out.ActiveSignalsPerRun*100.0, 2)
+	}
+	return nil
+}
+
+func fillInspectionEventPipeline(ctx context.Context, db *gorm.DB, out *inspectionEventPipeline) error {
+	if out.WindowHours <= 0 {
+		out.WindowHours = 24
+	}
+	cutoff := time.Now().UTC().Add(-time.Duration(out.WindowHours) * time.Hour)
+	if err := db.WithContext(ctx).Table("opportunity_events").Where("occurred_at >= ?", cutoff).Count(&out.TotalEvents24).Error; err != nil {
+		// table may not exist on old envs before migration; keep backward-compatible
+		if strings.Contains(strings.ToLower(err.Error()), "does not exist") {
+			return nil
+		}
+		return err
+	}
+	if err := db.WithContext(ctx).Table("opportunity_events").Where("status = ?", "pending").Count(&out.PendingEvents).Error; err != nil {
+		return err
+	}
+	var t sql.NullTime
+	if err := db.WithContext(ctx).Table("opportunity_events").Select("MAX(occurred_at)").Scan(&t).Error; err != nil {
+		return err
+	}
+	if t.Valid && !t.Time.IsZero() {
+		s := t.Time.UTC().Format(time.RFC3339)
+		out.LastEventAt = &s
+	}
+
+	type cycleAgg struct {
+		Total        int64 `gorm:"column:total"`
+		Success      int64 `gorm:"column:success"`
+		Degraded     int64 `gorm:"column:degraded"`
+		Error        int64 `gorm:"column:error"`
+		SignalsTotal int64 `gorm:"column:signals_total"`
+	}
+	var agg cycleAgg
+	if err := db.WithContext(ctx).
+		Table("agent_event_cycles").
+		Select(
+			"COUNT(*) AS total, "+
+				"COALESCE(SUM(CASE WHEN status = 'success' THEN 1 ELSE 0 END),0) AS success, "+
+				"COALESCE(SUM(CASE WHEN status = 'degraded' THEN 1 ELSE 0 END),0) AS degraded, "+
+				"COALESCE(SUM(CASE WHEN status = 'error' THEN 1 ELSE 0 END),0) AS error, "+
+				"COALESCE(SUM(signals_generated),0) AS signals_total",
+		).
+		Where("started_at >= ?", cutoff).
+		Scan(&agg).Error; err != nil {
+		if strings.Contains(strings.ToLower(err.Error()), "does not exist") {
+			return nil
+		}
+		return err
+	}
+	out.AgentCycles24 = agg.Total
+	out.AgentCycleSuccess24 = agg.Success
+	out.AgentCycleDegraded24 = agg.Degraded
+	out.AgentCycleError24 = agg.Error
+	out.SignalsFromEventCycles24 = agg.SignalsTotal
+
+	type latencyRow struct {
+		LatencySeconds float64 `gorm:"column:latency_seconds"`
+	}
+	latencies := make([]latencyRow, 0, 64)
+	if err := db.WithContext(ctx).
+		Table("agent_event_cycles").
+		Select("EXTRACT(EPOCH FROM (first_signal_at - first_event_at)) AS latency_seconds").
+		Where("started_at >= ?", cutoff).
+		Where("first_event_at IS NOT NULL AND first_signal_at IS NOT NULL").
+		Where("first_signal_at >= first_event_at").
+		Scan(&latencies).Error; err != nil {
+		if strings.Contains(strings.ToLower(err.Error()), "does not exist") {
+			return nil
+		}
+		return err
+	}
+	if len(latencies) > 0 {
+		values := make([]float64, 0, len(latencies))
+		sum := 0.0
+		for _, row := range latencies {
+			if row.LatencySeconds < 0 {
+				continue
+			}
+			values = append(values, row.LatencySeconds)
+			sum += row.LatencySeconds
+		}
+		if len(values) > 0 {
+			sort.Float64s(values)
+			out.TriggerToSignalLatencyAvgSecond = roundTo(sum/float64(len(values)), 2)
+			out.TriggerToSignalLatencyP50Second = roundTo(percentile(values, 0.5), 2)
+			out.TriggerToSignalLatencyP90Second = roundTo(percentile(values, 0.9), 2)
+		}
+	}
+	return nil
+}
+
+func fillInspectionCandidateFunnel(ctx context.Context, db *gorm.DB, out *inspectionCandidateFunnel) error {
+	type row struct {
+		State string `gorm:"column:state"`
+		Count int64  `gorm:"column:count"`
+	}
+	var rows []row
+	if err := db.WithContext(ctx).
+		Table("candidate_markets").
+		Select("state, COUNT(*) AS count").
+		Group("state").
+		Scan(&rows).Error; err != nil {
+		if strings.Contains(strings.ToLower(err.Error()), "does not exist") {
+			return nil
+		}
+		return err
+	}
+	for _, r := range rows {
+		switch strings.TrimSpace(strings.ToLower(r.State)) {
+		case "cold":
+			out.Cold = r.Count
+		case "watch":
+			out.Watch = r.Count
+		case "hot":
+			out.Hot = r.Count
+		case "tradable":
+			out.Tradable = r.Count
+		case "cool_down":
+			out.CoolDown = r.Count
+		}
+	}
+	return nil
+}
+
+func fillInspectionOpportunityWindow(ctx context.Context, db *gorm.DB, out *inspectionOpportunityWin) error {
+	if out.WindowHours <= 0 {
+		out.WindowHours = 24
+	}
+	cutoff := time.Now().UTC().Add(-time.Duration(out.WindowHours) * time.Hour)
+	type agg struct {
+		Total        int64 `gorm:"column:total"`
+		Triggered    int64 `gorm:"column:triggered"`
+		WithSignals  int64 `gorm:"column:with_signals"`
+		SignalsTotal int64 `gorm:"column:signals_total"`
+	}
+	var row agg
+	if err := db.WithContext(ctx).
+		Table("agent_event_cycles").
+		Select(
+			"COUNT(*) AS total, "+
+				"COALESCE(SUM(CASE WHEN events_consumed > 0 THEN 1 ELSE 0 END),0) AS triggered, "+
+				"COALESCE(SUM(CASE WHEN signals_generated > 0 THEN 1 ELSE 0 END),0) AS with_signals, "+
+				"COALESCE(SUM(signals_generated),0) AS signals_total",
+		).
+		Where("started_at >= ?", cutoff).
+		Scan(&row).Error; err != nil {
+		if strings.Contains(strings.ToLower(err.Error()), "does not exist") {
+			return nil
+		}
+		return err
+	}
+	out.TotalCycles24 = row.Total
+	out.TriggeredCycles24 = row.Triggered
+	out.CyclesWithSignals24 = row.WithSignals
+	if row.Triggered > 0 {
+		out.SignalHitRate24 = roundTo(float64(row.WithSignals)/float64(row.Triggered), 4)
+		out.AvgSignalsPerTriggered = roundTo(float64(row.SignalsTotal)/float64(row.Triggered), 4)
+	}
+	return nil
+}
+
+func fillInspectionVertexBrainBudget(ctx context.Context, db *gorm.DB, out *inspectionVertexBrainBudget) error {
+	cutoff := time.Now().UTC().Add(-24 * time.Hour)
+	cutoff1h := time.Now().UTC().Add(-1 * time.Hour)
+	var rows []model.AgentSession
+	if err := db.WithContext(ctx).
+		Where("started_at >= ?", cutoff).
+		Where("LOWER(run_mode) IN ?", []string{"vertex_brain", "event_driven", "vertex-controlled", "vertex_controlled"}).
+		Order("started_at DESC").
+		Find(&rows).Error; err != nil {
+		return err
+	}
+	out.VertexRuns24 = int64(len(rows))
+	if len(rows) == 0 {
+		return nil
+	}
+	var sumCalls int64
+	var sumTokens int64
+	var maxTokens int64
+	var lastDecodeAt time.Time
+	for _, row := range rows {
+		sumCalls += int64(row.LLMCalls)
+		sumTokens += int64(row.LLMTokens)
+		if int64(row.LLMTokens) > maxTokens {
+			maxTokens = int64(row.LLMTokens)
+		}
+		for _, code := range extractWarningCodesFromSummary(row.SummaryJSON) {
+			switch strings.ToLower(strings.TrimSpace(code)) {
+			case "token_budget_exhausted":
+				out.TokenBudgetExhausted24++
+			case "cycle_duration_exhausted":
+				out.DurationBudgetExceeded24++
+			case "external_budget_exhausted":
+				out.ExternalBudgetExhausted24++
+			case "tool_budget_exhausted":
+				out.ToolBudgetExhausted24++
+			case "plan_decode_failed":
+				out.PlanDecodeFailed24++
+				if row.StartedAt.After(cutoff1h) {
+					out.PlanDecodeFailed1H++
+				}
+				if row.StartedAt.After(lastDecodeAt) {
+					lastDecodeAt = row.StartedAt
+				}
+			}
+		}
+	}
+	if !lastDecodeAt.IsZero() {
+		s := lastDecodeAt.UTC().Format(time.RFC3339)
+		out.LastPlanDecodeFailedAt = &s
+	}
+	out.AvgLLMCalls = roundTo(float64(sumCalls)/float64(len(rows)), 2)
+	out.AvgLLMTokens = roundTo(float64(sumTokens)/float64(len(rows)), 2)
+	out.MaxLLMTokens = maxTokens
+	pressure := out.TokenBudgetExhausted24 + out.DurationBudgetExceeded24 + out.ExternalBudgetExhausted24 + out.ToolBudgetExhausted24
+	out.BudgetPressureRate24 = roundTo(float64(pressure)/float64(len(rows)), 4)
+	return nil
+}
+
+func fillInspectionControlPlane(ctx context.Context, db *gorm.DB, out *inspectionControlPlane) error {
+	if out == nil {
+		return nil
+	}
+	out.Mode = "vertex_brain"
+	out.LegacyVertexAnalyzeEnabled = strings.EqualFold(strings.TrimSpace(getEnvOrDefault("SKY_ALPHA_AGENT_ALLOW_LEGACY_VERTEX_ANALYZE", "false")), "true")
+
+	cutoff := time.Now().UTC().Add(-24 * time.Hour)
+	if err := db.WithContext(ctx).
+		Table("agent_logs").
+		Where("created_at >= ?", cutoff).
+		Where("action = ?", "analyze").
+		Where("model <> ''").
+		Where("model <> ?", "rule-based-fallback-v1").
+		Count(&out.LegacyVertexAnalyzeBypass24H).Error; err != nil {
+		return err
+	}
+	return nil
+}
+
+func getEnvOrDefault(key, fallback string) string {
+	v := strings.TrimSpace(os.Getenv(strings.TrimSpace(key)))
+	if v == "" {
+		return fallback
+	}
+	return v
+}
+
 func fillSpecFillTrend(ctx context.Context, db *gorm.DB, out *inspectionSpecFillTrend) error {
 	cutoff := time.Now().UTC().Add(-24 * time.Hour)
 
@@ -535,46 +1148,62 @@ func fillSpecFillTrend(ctx context.Context, db *gorm.DB, out *inspectionSpecFill
 }
 
 func fillSpecFillDiagnostics(ctx context.Context, db *gorm.DB, out *inspectionSpecFillDiag) error {
-	if err := db.WithContext(ctx).Table("markets").Where("is_active = ?", true).Count(&out.ActiveMarkets).Error; err != nil {
-		return err
-	}
-	if err := db.WithContext(ctx).Table("markets").Where("is_active = ? AND spec_status = 'ready'", true).Count(&out.SpecReady).Error; err != nil {
-		return err
-	}
-	if err := db.WithContext(ctx).Table("markets").Where("is_active = ? AND COALESCE(city,'') = ''", true).Count(&out.CityMissing).Error; err != nil {
-		return err
-	}
-	if err := db.WithContext(ctx).Table("markets").Where("is_active = ? AND threshold_f IS NULL", true).Count(&out.ThresholdMissing).Error; err != nil {
-		return err
-	}
-	if err := db.WithContext(ctx).Table("markets").Where("is_active = ? AND COALESCE(comparator,'') = ''", true).Count(&out.ComparatorMissing).Error; err != nil {
-		return err
-	}
-	if err := db.WithContext(ctx).Table("markets").Where("is_active = ? AND weather_target_date IS NULL", true).Count(&out.TargetDateMissing).Error; err != nil {
-		return err
-	}
-
-	type statusRow struct {
-		SpecStatus string `gorm:"column:spec_status"`
-		Count      int64  `gorm:"column:count"`
-	}
-	var rows []statusRow
-	if err := db.WithContext(ctx).Table("markets").
-		Select("COALESCE(spec_status,'') AS spec_status, COUNT(*) AS count").
+	var rows []model.Market
+	if err := db.WithContext(ctx).Model(&model.Market{}).
+		Select("id, market_type, question, city, spec_status, threshold_f, comparator, weather_target_date").
 		Where("is_active = ?", true).
-		Group("COALESCE(spec_status,'')").
-		Order("count DESC").
-		Scan(&rows).Error; err != nil {
+		Find(&rows).Error; err != nil {
 		return err
 	}
-	out.BySpecStatus = make(map[string]int64, len(rows))
+	out.ActiveMarkets = int64(len(rows))
+	out.BySpecStatus = make(map[string]int64, 8)
+	unsupportedReasons := make(map[string]int64, 8)
 	for _, row := range rows {
-		key := strings.TrimSpace(row.SpecStatus)
+		reason := signal.UnsupportedReasonForSignal(row)
+		if reason != "" {
+			unsupportedReasons[reason]++
+			continue
+		}
+		out.SupportedMarkets++
+		if strings.TrimSpace(row.City) == "" {
+			out.CityMissing++
+		}
+		if !row.ThresholdF.Valid {
+			out.ThresholdMissing++
+		}
+		if strings.TrimSpace(row.Comparator) == "" {
+			out.ComparatorMissing++
+		}
+		if row.WeatherTargetDate == nil || row.WeatherTargetDate.IsZero() {
+			out.TargetDateMissing++
+		}
+		status := strings.TrimSpace(row.SpecStatus)
+		if strings.EqualFold(status, "ready") {
+			out.SpecReady++
+		}
+		key := status
 		if key == "" {
 			key = "unknown"
 		}
-		out.BySpecStatus[key] = row.Count
+		out.BySpecStatus[key]++
 	}
+	reasonRows := make([]inspectionGroupKV, 0, len(unsupportedReasons))
+	for reason, count := range unsupportedReasons {
+		reasonRows = append(reasonRows, inspectionGroupKV{
+			Key1:  reason,
+			Count: count,
+		})
+	}
+	sort.Slice(reasonRows, func(i, j int) bool {
+		if reasonRows[i].Count == reasonRows[j].Count {
+			return reasonRows[i].Key1 < reasonRows[j].Key1
+		}
+		return reasonRows[i].Count > reasonRows[j].Count
+	})
+	if len(reasonRows) > 5 {
+		reasonRows = reasonRows[:5]
+	}
+	out.UnsupportedTopReasons = reasonRows
 	return nil
 }
 
@@ -708,11 +1337,27 @@ func buildInspectionAlerts(resp opsInspectionResponse) []inspectionAlert {
 			Message:  "scheduler summary reports degraded state",
 		})
 	}
-	if resp.ValueDashboard.LatestMarketsTotal > 0 && resp.ValueDashboard.LatestSpecReady == 0 {
+	// Real-time funnel blocker should rely on current market diagnostics, not stale signal_runs snapshots.
+	if resp.SpecFillDiag.SupportedMarkets > 0 && resp.SpecFillDiag.SpecReady == 0 {
 		out = append(out, inspectionAlert{
 			Code:     "signal_funnel_spec_blocked",
 			Severity: "critical",
-			Message:  "latest signal run has markets_total>0 but spec_ready=0",
+			Message:  "supported markets exist but current spec_ready is 0",
+		})
+	}
+	// Surface stale signal generation separately to avoid confusing stale snapshots with current blocker state.
+	if resp.ValueDashboard.LatestMarketsTotal == 0 {
+		out = append(out, inspectionAlert{
+			Code:     "signal_run_stale",
+			Severity: "warning",
+			Message:  "no recent signal run snapshot available",
+		})
+	}
+	if resp.SpecFillTrend.NoProgress24H > 0 {
+		out = append(out, inspectionAlert{
+			Code:     "spec_fill_no_progress",
+			Severity: "warning",
+			Message:  "market_spec_fill had skipped_no_input runs in last 24h",
 		})
 	}
 	if resp.ValueDashboard.Signals7D == 0 {
@@ -729,5 +1374,177 @@ func buildInspectionAlerts(resp opsInspectionResponse) []inspectionAlert {
 			Message:  "no trades executed in the last 7 days",
 		})
 	}
+	if resp.StrategyEvolution.RolledBack24H > 0 {
+		out = append(out, inspectionAlert{
+			Code:     "strategy_auto_rollback",
+			Severity: "warning",
+			Message:  "auto rollback triggered in strategy evolution within last 24h",
+		})
+	}
+	if resp.StrategyEvolution.CandidateRolloutPct > 0 && resp.StrategyEvolution.Changes24H == 0 {
+		out = append(out, inspectionAlert{
+			Code:     "strategy_rollout_untracked",
+			Severity: "warning",
+			Message:  "candidate rollout is active but no strategy change records in last 24h",
+		})
+	}
+	if resp.PromptRollout.CandidateRuns >= 3 &&
+		resp.PromptRollout.ActiveRuns >= 3 &&
+		resp.PromptRollout.CandidateSignalsPerRun < resp.PromptRollout.ActiveSignalsPerRun {
+		out = append(out, inspectionAlert{
+			Code:     "prompt_candidate_underperforming",
+			Severity: "warning",
+			Message:  "candidate prompt performs worse than active on signals_per_run in current window",
+		})
+	}
+	if resp.StrategyEvolution.CandidateRolloutPct > 0 && resp.PromptRollout.CandidateRuns == 0 {
+		out = append(out, inspectionAlert{
+			Code:     "prompt_rollout_no_sample",
+			Severity: "warning",
+			Message:  "candidate rollout enabled but no candidate runs observed in current window",
+		})
+	}
+	if resp.OpportunityWin.TriggeredCycles24 > 0 && resp.OpportunityWin.CyclesWithSignals24 == 0 {
+		out = append(out, inspectionAlert{
+			Code:     "opportunity_windows_no_signal",
+			Severity: "warning",
+			Message:  "opportunity cycles were triggered in 24h but no signals were generated",
+		})
+	}
+	if resp.VertexBrainBudget.BudgetPressureRate24 >= 0.2 {
+		out = append(out, inspectionAlert{
+			Code:     "vertex_budget_pressure",
+			Severity: "warning",
+			Message:  "vertex brain cycles show high budget pressure in last 24h",
+		})
+	}
+	if resp.VertexBrainBudget.PlanDecodeFailed1H > 0 {
+		out = append(out, inspectionAlert{
+			Code:     "vertex_plan_decode_failed",
+			Severity: "warning",
+			Message:  "vertex plan/action decode failures observed in last 1h",
+		})
+	}
+	if !resp.ControlPlane.LegacyVertexAnalyzeEnabled && resp.ControlPlane.LegacyVertexAnalyzeBypass24H > 0 {
+		out = append(out, inspectionAlert{
+			Code:     "control_plane_bypass_detected",
+			Severity: "warning",
+			Message:  "legacy vertex analyze bypass calls detected in last 24h",
+		})
+	}
 	return out
+}
+
+func buildInspectionActionPlan(resp opsInspectionResponse) ([]string, []string) {
+	immediate := make([]string, 0, 6)
+	h48 := make([]string, 0, 6)
+	if resp.SpecFillDiag.SupportedMarkets > 0 && resp.SpecFillDiag.SpecReady == 0 {
+		immediate = append(immediate, "P0: 排查 market_spec_fill 与 city/spec 解析链路，先让 spec_ready > 0。")
+	}
+	if resp.StrategyEvolution.RolledBack24H > 0 {
+		immediate = append(immediate, "P1: 查看 /ops/agent/strategy-changes 最近回滚原因，修正 candidate prompt 后再小流量灰度。")
+	}
+	if resp.PromptRollout.CandidateRuns >= 3 &&
+		resp.PromptRollout.ActiveRuns >= 3 &&
+		resp.PromptRollout.CandidateSignalsPerRun < resp.PromptRollout.ActiveSignalsPerRun {
+		immediate = append(immediate, "P1: candidate prompt 当前劣化，建议继续降 rollout 或暂停 candidate。")
+	}
+	if resp.ValueDashboard.Signals7D == 0 {
+		immediate = append(immediate, "P1: 近7天无信号，优先检查 candidate_funnel 与 signal_runs.skip_reasons。")
+	}
+	if resp.VertexBrainBudget.PlanDecodeFailed1H > 0 {
+		immediate = append(immediate, "P1: 存在 plan_decode_failed，检查 prompt 输出约束与 max_tokens_per_cycle 配置。")
+	}
+	if !resp.ControlPlane.LegacyVertexAnalyzeEnabled && resp.ControlPlane.LegacyVertexAnalyzeBypass24H > 0 {
+		immediate = append(immediate, "P1: 检测到 legacy analyze 旁路 Vertex 调用，需统一收口到 vertex_brain control plane。")
+	}
+	if resp.VertexBrainBudget.BudgetPressureRate24 >= 0.2 {
+		immediate = append(immediate, "P1: Vertex 预算压力偏高，收敛单轮 tool 数并提高 token/duration 预算上限。")
+	}
+	if resp.ValueDashboard.Trades7D == 0 && resp.ValueDashboard.Signals7D > 0 {
+		immediate = append(immediate, "P2: 有信号无交易，检查 exec_edge 门限、流动性门槛与交易风控。")
+	}
+
+	if resp.SpecFillDiag.SpecReady > 0 {
+		h48 = append(h48, "48h: 观察 spec_ready/forecast_ready 是否持续提升，避免漏斗回退到 blocked。")
+	}
+	if resp.ValueDashboard.Signals7D == 0 || resp.ValueDashboard.Trades7D == 0 {
+		h48 = append(h48, "48h: 按 6h 粒度跟踪 signals/trades/net_pnl，确认是否从“可运行”走向“可盈利”。")
+	}
+	if resp.PromptRollout.CandidateRuns > 0 {
+		h48 = append(h48, "48h: 对比 prompt rollout active/candidate 的 signals_per_run 与 error_rate，决定 keep/rollback。")
+	}
+	if resp.OpportunityWin.TriggeredCycles24 > 0 && resp.OpportunityWin.CyclesWithSignals24 == 0 {
+		h48 = append(h48, "48h: 复盘 opportunity_windows 到 signals 的转化链路，定位触发有效性与门限设置。")
+	}
+	if resp.VertexBrainBudget.VertexRuns24 > 0 {
+		h48 = append(h48, "48h: 持续跟踪 vertex_brain_budget，确保 budget_pressure_rate 与 decode_failures 持续下降。")
+	}
+
+	if len(immediate) == 0 {
+		immediate = append(immediate, "系统运行正常，当前无需紧急处置。")
+	}
+	if len(h48) == 0 {
+		h48 = append(h48, "48h: 继续常规巡检，关注 signals/trades/net_pnl 与关键错误码变化。")
+	}
+	return immediate, h48
+}
+
+func extractWarningCodesFromSummary(raw []byte) []string {
+	if len(raw) == 0 {
+		return nil
+	}
+	var obj map[string]any
+	if err := json.Unmarshal(raw, &obj); err != nil {
+		return nil
+	}
+	rawWarnings, ok := obj["warnings"]
+	if !ok {
+		return nil
+	}
+	items, ok := rawWarnings.([]any)
+	if !ok {
+		return nil
+	}
+	out := make([]string, 0, len(items))
+	for _, item := range items {
+		m, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		code, _ := m["code"].(string)
+		code = strings.TrimSpace(code)
+		if code != "" {
+			out = append(out, code)
+		}
+	}
+	return out
+}
+
+func extractSignalsGeneratedFromSummaryForInspection(raw []byte) int64 {
+	if len(raw) == 0 {
+		return 0
+	}
+	var obj map[string]any
+	if err := json.Unmarshal(raw, &obj); err != nil {
+		return 0
+	}
+	funnel, ok := obj["funnel"].(map[string]any)
+	if !ok {
+		return 0
+	}
+	v, ok := funnel["signals_generated"]
+	if !ok {
+		return 0
+	}
+	switch n := v.(type) {
+	case float64:
+		return int64(n)
+	case int:
+		return int64(n)
+	case int64:
+		return n
+	default:
+		return 0
+	}
 }

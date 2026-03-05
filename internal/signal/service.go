@@ -45,7 +45,10 @@ const (
 	skipReasonExecEdgeBelow      = "edge_below_exec_threshold"
 	skipReasonPersistFailed      = "persist_failed"
 	skipReasonUnsupportedMarket  = "unsupported_market_type"
+	skipReasonWriteBudget        = "signal_write_budget_exhausted"
 )
+
+var errSignalWriteBudgetExceeded = errors.New("signal write budget exhausted")
 
 type marketSpec struct {
 	City       string
@@ -162,6 +165,21 @@ func (s *Service) GenerateSignals(ctx context.Context, opts GenerateOptions) (*G
 		Find(&markets).Error; err != nil {
 		return nil, err
 	}
+	supported := make([]model.Market, 0, len(markets))
+	unsupported := 0
+	candidates := candidateMarketIDsFromCtx(ctx)
+	for _, m := range markets {
+		if len(candidates) > 0 {
+			if _, ok := candidates[m.ID]; !ok {
+				continue
+			}
+		}
+		if IsSupportedMarketForSignal(m) {
+			supported = append(supported, m)
+			continue
+		}
+		unsupported++
+	}
 
 	knownCities, err := s.loadKnownCities(ctx)
 	if err != nil {
@@ -169,12 +187,16 @@ func (s *Service) GenerateSignals(ctx context.Context, opts GenerateOptions) (*G
 	}
 
 	result := &GenerateResult{
-		Processed:    len(markets),
-		MarketsTotal: len(markets),
+		Processed:    len(supported),
+		MarketsTotal: len(supported),
 		SkipReasons:  make(map[string]int),
 		Errors:       make([]string, 0),
 	}
-	if len(markets) == 0 {
+	if unsupported > 0 {
+		result.Skipped += unsupported
+		result.SkipReasons[skipReasonUnsupportedMarket] = unsupported
+	}
+	if len(supported) == 0 {
 		s.persistSignalRun(ctx, result, startedAt, time.Now().UTC())
 		return result, nil
 	}
@@ -188,7 +210,7 @@ func (s *Service) GenerateSignals(ctx context.Context, opts GenerateOptions) (*G
 	g, gctx := errgroup.WithContext(ctx)
 	g.SetLimit(workers)
 
-	for _, market := range markets {
+	for _, market := range supported {
 		m := market
 		g.Go(func() error {
 			eval, genErr := s.generateSignalForMarket(gctx, m, knownCities)
@@ -443,6 +465,10 @@ func (s *Service) generateSignalForMarket(ctx context.Context, m model.Market, k
 		CreatedAt:             time.Now().UTC(),
 	}
 	if err := s.upsertSignalByDay(ctx, row); err != nil {
+		if errors.Is(err, errSignalWriteBudgetExceeded) {
+			eval.SkipReason = skipReasonWriteBudget
+			return eval, nil
+		}
 		eval.SkipReason = skipReasonPersistFailed
 		return eval, err
 	}
@@ -465,6 +491,11 @@ func (s *Service) loadMarket(ctx context.Context, marketRef string) (*model.Mark
 }
 
 func (s *Service) ensureMarketSpec(ctx context.Context, m model.Market, knownCities []string) (marketSpec, string, error) {
+	if !IsSupportedMarketForSignal(m) {
+		spec := marketSpec{Status: "unsupported"}
+		_ = s.persistMarketSpec(ctx, m.ID, spec)
+		return spec, skipReasonUnsupportedMarket, nil
+	}
 	marketType := strings.ToLower(strings.TrimSpace(m.MarketType))
 	comparator := normalizeComparator(m.Comparator, marketType)
 	if comparator == "" {
@@ -534,6 +565,9 @@ func (s *Service) persistMarketSpec(ctx context.Context, marketID string, spec m
 }
 
 func (s *Service) upsertSignalByDay(ctx context.Context, row model.Signal) error {
+	if !consumeSignalWriteBudget(ctx) {
+		return errSignalWriteBudgetExceeded
+	}
 	var existing model.Signal
 	err := s.db.WithContext(ctx).
 		Where("market_id = ?", row.MarketID).
@@ -904,7 +938,13 @@ func inferComparatorFromQuestion(question string) string {
 		strings.Contains(q, "at most"),
 		strings.Contains(q, "no more than"),
 		strings.Contains(q, "lower"),
-		strings.Contains(q, "at or below"):
+		strings.Contains(q, "at or below"),
+		strings.Contains(q, "low temperature"),
+		strings.Contains(q, "low temp"),
+		strings.Contains(q, "minimum temperature"),
+		strings.Contains(q, "min temperature"),
+		strings.Contains(q, "daily low"),
+		strings.Contains(q, "overnight low"):
 		return "le"
 	case strings.Contains(q, "above"),
 		strings.Contains(q, "over"),
@@ -912,7 +952,12 @@ func inferComparatorFromQuestion(question string) string {
 		strings.Contains(q, "at least"),
 		strings.Contains(q, "no less than"),
 		strings.Contains(q, "higher"),
-		strings.Contains(q, "at or above"):
+		strings.Contains(q, "at or above"),
+		strings.Contains(q, "high temperature"),
+		strings.Contains(q, "high temp"),
+		strings.Contains(q, "maximum temperature"),
+		strings.Contains(q, "max temperature"),
+		strings.Contains(q, "daily high"):
 		return "ge"
 	default:
 		return ""

@@ -27,6 +27,8 @@ type runAgentCycleRequest struct {
 	TradeEnabled        bool   `json:"trade_enabled"`
 	MaxToolCalls        int    `json:"max_tool_calls"`
 	MaxExternalRequests int    `json:"max_external_requests"`
+	MaxTokensPerCycle   int    `json:"max_tokens_per_cycle"`
+	MaxCycleDurationSec int    `json:"max_cycle_duration_sec"`
 	MemoryWindow        int    `json:"memory_window"`
 	MarketLimit         int    `json:"market_limit"`
 }
@@ -152,6 +154,8 @@ func RunAgentCycleHandler(svc *agent.Service) gin.HandlerFunc {
 			TradeEnabled:        body.TradeEnabled,
 			MaxToolCalls:        body.MaxToolCalls,
 			MaxExternalRequests: body.MaxExternalRequests,
+			MaxTokensPerCycle:   body.MaxTokensPerCycle,
+			MaxCycleDurationSec: body.MaxCycleDurationSec,
 			MemoryWindow:        body.MemoryWindow,
 			MarketLimit:         body.MarketLimit,
 		})

@@ -13,7 +13,7 @@ func AutoMigrate(db *gorm.DB) error {
 		return fmt.Errorf("create extension pgcrypto: %w", err)
 	}
 
-	return db.AutoMigrate(
+	if err := db.AutoMigrate(
 		&model.Market{},
 		&model.MarketPrice{},
 		&model.Forecast{},
@@ -34,6 +34,19 @@ func AutoMigrate(db *gorm.DB) error {
 		&model.AgentMemory{},
 		&model.AgentReport{},
 		&model.AgentValidation{},
+		&model.AgentStrategyChange{},
+		&model.AgentStrategyParam{},
 		&model.SchedulerRun{},
-	)
+		&model.OpportunityEvent{},
+		&model.CandidateMarket{},
+		&model.CandidateStateTransition{},
+		&model.AgentEventCycle{},
+	); err != nil {
+		return err
+	}
+
+	if err := EnsureDefaultActivePromptVersion(db); err != nil {
+		return fmt.Errorf("ensure default active prompt version: %w", err)
+	}
+	return nil
 }

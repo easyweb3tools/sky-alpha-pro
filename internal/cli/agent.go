@@ -74,6 +74,7 @@ func newAgentCycleCmd() *cobra.Command {
 			fmt.Fprintf(cmd.OutOrStdout(), "status:    %s\n", result.Status)
 			fmt.Fprintf(cmd.OutOrStdout(), "decision:  %s\n", result.Decision)
 			fmt.Fprintf(cmd.OutOrStdout(), "llm_calls: %d\n", result.LLMCalls)
+			fmt.Fprintf(cmd.OutOrStdout(), "llm_tokens:%d\n", result.LLMTokens)
 			fmt.Fprintf(cmd.OutOrStdout(), "tools:     %d\n", result.ToolCalls)
 			return nil
 		},

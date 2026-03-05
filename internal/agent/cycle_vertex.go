@@ -19,9 +19,9 @@ Rules:
 3) Do not use trade.place.batch when trade_enabled=false.
 4) Keep plan concise (<= 8 steps).`
 
-func (v *vertexAIClient) PlanCycle(ctx context.Context, input cyclePromptInput, systemPrompt string) (*cyclePlanOutput, error) {
-	if v == nil || v.client == nil {
-		return nil, fmt.Errorf("vertex ai client is not configured")
+func (v *vertexAIClient) PlanCycle(ctx context.Context, input cyclePromptInput, systemPrompt string) (*cyclePlanOutput, int, error) {
+	if v == nil {
+		return nil, 0, fmt.Errorf("vertex ai client is not configured")
 	}
 	sys := strings.TrimSpace(systemPrompt)
 	if sys == "" {
@@ -37,31 +37,49 @@ func (v *vertexAIClient) PlanCycle(ctx context.Context, input cyclePromptInput, 
 
 	promptBody, err := json.Marshal(input)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 
-	resp, err := v.client.Models.GenerateContent(
-		callCtx,
-		v.model,
-		genai.Text(buildCyclePlanPrompt(string(promptBody))),
-		&genai.GenerateContentConfig{
-			SystemInstruction: genai.NewContentFromText(sys, genai.RoleUser),
-			Temperature:       genai.Ptr(v.temperature),
-			MaxOutputTokens:   int32(v.maxOutputTokens),
-			ResponseMIMEType:  "application/json",
-		},
-	)
-	if err != nil {
-		return nil, err
+	var text string
+	llmTokens := 0
+	if v.apiKey != "" {
+		raw, usage, err := v.generateWithAPIKey(callCtx, sys, buildCyclePlanPrompt(string(promptBody)), v.temperature, v.maxOutputTokens)
+		if err != nil {
+			return nil, 0, err
+		}
+		if usage != nil {
+			llmTokens = usage.PromptTokens + usage.CompletionTokens
+		}
+		text = strings.TrimSpace(raw)
+	} else {
+		if v.client == nil {
+			return nil, 0, fmt.Errorf("vertex ai client is not configured")
+		}
+		resp, err := v.client.Models.GenerateContent(
+			callCtx,
+			v.model,
+			genai.Text(buildCyclePlanPrompt(string(promptBody))),
+			&genai.GenerateContentConfig{
+				SystemInstruction: genai.NewContentFromText(sys, genai.RoleUser),
+				Temperature:       genai.Ptr(v.temperature),
+				MaxOutputTokens:   int32(v.maxOutputTokens),
+				ResponseMIMEType:  "application/json",
+			},
+		)
+		if err != nil {
+			return nil, 0, err
+		}
+		if resp.UsageMetadata != nil {
+			llmTokens = int(resp.UsageMetadata.PromptTokenCount + resp.UsageMetadata.CandidatesTokenCount)
+		}
+		text = strings.TrimSpace(resp.Text())
 	}
-	text := strings.TrimSpace(resp.Text())
 	if text == "" {
-		return nil, fmt.Errorf("vertex ai returned empty plan")
+		return nil, 0, fmt.Errorf("vertex ai returned empty plan")
 	}
-	text = extractJSONObject(text)
 	var out cyclePlanOutput
-	if err := json.Unmarshal([]byte(text), &out); err != nil {
-		return nil, fmt.Errorf("decode cycle plan json: %w", err)
+	if err := decodeVertexJSON(text, &out); err != nil {
+		return nil, 0, fmt.Errorf("decode cycle plan json: %w", err)
 	}
 	out.Decision = strings.ToLower(strings.TrimSpace(out.Decision))
 	if out.Decision == "" {
@@ -77,7 +95,7 @@ func (v *vertexAIClient) PlanCycle(ctx context.Context, input cyclePromptInput, 
 			out.Plan[i].Args = map[string]any{}
 		}
 	}
-	return &out, nil
+	return &out, llmTokens, nil
 }
 
 func buildCyclePlanPrompt(inputJSON string) string {
@@ -124,7 +142,7 @@ Rules:
 4) Keep concise and actionable.`
 
 func (v *vertexAIClient) ValidateCycle(ctx context.Context, input cycleValidationInput) (*cycleValidationOutput, error) {
-	if v == nil || v.client == nil {
+	if v == nil {
 		return nil, fmt.Errorf("vertex ai client is not configured")
 	}
 	callCtx := ctx
@@ -139,27 +157,38 @@ func (v *vertexAIClient) ValidateCycle(ctx context.Context, input cycleValidatio
 		return nil, err
 	}
 
-	resp, err := v.client.Models.GenerateContent(
-		callCtx,
-		v.model,
-		genai.Text("Cycle result JSON:\n"+string(body)+"\n\nReturn strict JSON only."),
-		&genai.GenerateContentConfig{
-			SystemInstruction: genai.NewContentFromText(cycleValidationSystemPrompt, genai.RoleUser),
-			Temperature:       genai.Ptr(float32(0.1)),
-			MaxOutputTokens:   int32(minInt(v.maxOutputTokens, 1024)),
-			ResponseMIMEType:  "application/json",
-		},
-	)
-	if err != nil {
-		return nil, err
+	var text string
+	if v.apiKey != "" {
+		out, err := v.validateWithAPIKeyToolCall(callCtx, cycleValidationSystemPrompt, "Cycle result JSON:\n"+string(body))
+		if err != nil {
+			return nil, err
+		}
+		return out, nil
+	} else {
+		if v.client == nil {
+			return nil, fmt.Errorf("vertex ai client is not configured")
+		}
+		resp, err := v.client.Models.GenerateContent(
+			callCtx,
+			v.model,
+			genai.Text("Cycle result JSON:\n"+string(body)+"\n\nReturn strict JSON only."),
+			&genai.GenerateContentConfig{
+				SystemInstruction: genai.NewContentFromText(cycleValidationSystemPrompt, genai.RoleUser),
+				Temperature:       genai.Ptr(float32(0.1)),
+				MaxOutputTokens:   int32(minInt(v.maxOutputTokens, 1024)),
+				ResponseMIMEType:  "application/json",
+			},
+		)
+		if err != nil {
+			return nil, err
+		}
+		text = strings.TrimSpace(resp.Text())
 	}
-	text := strings.TrimSpace(resp.Text())
 	if text == "" {
 		return nil, fmt.Errorf("vertex ai returned empty validation")
 	}
-	text = extractJSONObject(text)
 	var out cycleValidationOutput
-	if err := json.Unmarshal([]byte(text), &out); err != nil {
+	if err := decodeVertexJSON(text, &out); err != nil {
 		return nil, fmt.Errorf("decode cycle validation json: %w", err)
 	}
 	out.Verdict = strings.ToLower(strings.TrimSpace(out.Verdict))
@@ -185,21 +214,22 @@ func minInt(a, b int) int {
 
 const cycleActionSystemPrompt = `You are Sky Alpha Pro's brain loop controller.
 Given runtime context and step history, decide the NEXT single tool call.
-Return strict JSON only:
-decision, tool, args, why, on_fail, summary.
+You must respond via function calling:
+- call_tool(tool, args, why, on_fail, summary)
+- finish_cycle(summary, why)
 Rules:
-1) decision must be call_tool or finish.
-2) Use one tool per turn.
-3) Keep args minimal and valid.
-4) Prefer tools in this list:
+1) Use one tool per turn.
+1.1) Never output code, print(), markdown, or plain text instructions.
+2) Keep args minimal and valid.
+3) Prefer tools in this list:
 market.sync.batch, market.city.resolve.batch, market.cities.active,
 weather.forecast.batch, signal.generate.batch, chain.scan.batch,
 report.generate, report.validate.write.
-5) End with finish when no more useful actions remain.`
+4) End with finish_cycle when no more useful actions remain.`
 
-func (v *vertexAIClient) NextCycleAction(ctx context.Context, input cyclePromptInput, history []map[string]any, step, maxSteps int) (*cycleActionOutput, error) {
-	if v == nil || v.client == nil {
-		return nil, fmt.Errorf("vertex ai client is not configured")
+func (v *vertexAIClient) NextCycleAction(ctx context.Context, step, maxSteps int, conversation []map[string]any) (*cycleActionOutput, int, error) {
+	if v == nil {
+		return nil, 0, fmt.Errorf("vertex ai client is not configured")
 	}
 	callCtx := ctx
 	cancel := func() {}
@@ -208,38 +238,50 @@ func (v *vertexAIClient) NextCycleAction(ctx context.Context, input cyclePromptI
 	}
 	defer cancel()
 
-	body, err := json.Marshal(map[string]any{
-		"step":      step,
-		"max_steps": maxSteps,
-		"context":   input,
-		"history":   history,
-	})
-	if err != nil {
-		return nil, err
+	if len(conversation) == 0 {
+		return nil, 0, fmt.Errorf("cycle conversation is empty")
 	}
 
-	resp, err := v.client.Models.GenerateContent(
-		callCtx,
-		v.model,
-		genai.Text("Cycle control input JSON:\n"+string(body)+"\n\nReturn strict JSON only."),
-		&genai.GenerateContentConfig{
-			SystemInstruction: genai.NewContentFromText(cycleActionSystemPrompt, genai.RoleUser),
-			Temperature:       genai.Ptr(float32(0.1)),
-			MaxOutputTokens:   int32(minInt(v.maxOutputTokens, 1024)),
-			ResponseMIMEType:  "application/json",
-		},
-	)
-	if err != nil {
-		return nil, err
+	var text string
+	llmTokens := 0
+	if v.apiKey != "" {
+		action, usage, err := v.nextActionWithAPIKeyToolCall(callCtx, cycleActionSystemPrompt, conversation)
+		if err != nil {
+			return nil, 0, err
+		}
+		if usage != nil {
+			llmTokens = usage.PromptTokens + usage.CompletionTokens
+		}
+		return action, llmTokens, nil
+	} else {
+		if v.client == nil {
+			return nil, 0, fmt.Errorf("vertex ai client is not configured")
+		}
+		resp, err := v.client.Models.GenerateContent(
+			callCtx,
+			v.model,
+			genai.Text("Cycle control input JSON:\n"+collapseConversationForPrompt(conversation)+"\n\nReturn strict JSON only."),
+			&genai.GenerateContentConfig{
+				SystemInstruction: genai.NewContentFromText(cycleActionSystemPrompt, genai.RoleUser),
+				Temperature:       genai.Ptr(float32(0.1)),
+				MaxOutputTokens:   int32(minInt(v.maxOutputTokens, 1024)),
+				ResponseMIMEType:  "application/json",
+			},
+		)
+		if err != nil {
+			return nil, 0, err
+		}
+		if resp.UsageMetadata != nil {
+			llmTokens = int(resp.UsageMetadata.PromptTokenCount + resp.UsageMetadata.CandidatesTokenCount)
+		}
+		text = strings.TrimSpace(resp.Text())
 	}
-	text := strings.TrimSpace(resp.Text())
 	if text == "" {
-		return nil, fmt.Errorf("vertex ai returned empty action")
+		return nil, 0, fmt.Errorf("vertex ai returned empty action")
 	}
-	text = extractJSONObject(text)
 	var out cycleActionOutput
-	if err := json.Unmarshal([]byte(text), &out); err != nil {
-		return nil, fmt.Errorf("decode cycle action json: %w", err)
+	if err := decodeVertexJSON(text, &out); err != nil {
+		return nil, 0, fmt.Errorf("decode cycle action json: %w", err)
 	}
 	out.Decision = strings.ToLower(strings.TrimSpace(out.Decision))
 	if out.Decision == "" {
@@ -253,7 +295,18 @@ func (v *vertexAIClient) NextCycleAction(ctx context.Context, input cyclePromptI
 	if out.Args == nil {
 		out.Args = map[string]any{}
 	}
-	return &out, nil
+	return &out, llmTokens, nil
+}
+
+func collapseConversationForPrompt(conversation []map[string]any) string {
+	if len(conversation) == 0 {
+		return "{}"
+	}
+	b, err := json.Marshal(conversation)
+	if err != nil {
+		return "{}"
+	}
+	return string(b)
 }
 
 func extractJSONObject(raw string) string {
@@ -274,4 +327,77 @@ func extractJSONObject(raw string) string {
 		return txt[start : end+1]
 	}
 	return txt
+}
+
+func decodeVertexJSON(raw string, out any) error {
+	txt := extractJSONObject(raw)
+	if err := json.Unmarshal([]byte(txt), out); err == nil {
+		return nil
+	}
+	if repaired := repairTruncatedJSON(txt); repaired != "" && repaired != txt {
+		if err := json.Unmarshal([]byte(repaired), out); err == nil {
+			return nil
+		}
+	}
+	return json.Unmarshal([]byte(txt), out)
+}
+
+func repairTruncatedJSON(in string) string {
+	s := strings.TrimSpace(in)
+	if s == "" {
+		return ""
+	}
+	var b strings.Builder
+	b.Grow(len(s) + 8)
+	inStr := false
+	escaped := false
+	openObj := 0
+	openArr := 0
+	for _, r := range s {
+		b.WriteRune(r)
+		if inStr {
+			if escaped {
+				escaped = false
+				continue
+			}
+			if r == '\\' {
+				escaped = true
+				continue
+			}
+			if r == '"' {
+				inStr = false
+			}
+			continue
+		}
+		if r == '"' {
+			inStr = true
+			continue
+		}
+		switch r {
+		case '{':
+			openObj++
+		case '}':
+			if openObj > 0 {
+				openObj--
+			}
+		case '[':
+			openArr++
+		case ']':
+			if openArr > 0 {
+				openArr--
+			}
+		}
+	}
+	if inStr {
+		b.WriteString(`"`)
+	}
+	for openArr > 0 {
+		b.WriteByte(']')
+		openArr--
+	}
+	for openObj > 0 {
+		b.WriteByte('}')
+		openObj--
+	}
+	return b.String()
 }

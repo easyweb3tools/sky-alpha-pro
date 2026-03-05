@@ -35,6 +35,9 @@ func newServeCmd() *cobra.Command {
 			if err := database.AutoMigrate(db); err != nil {
 				return err
 			}
+			if err := database.EnsureDefaultActivePromptVersion(db); err != nil {
+				return err
+			}
 
 			metricReg := metrics.New(appConfig.Metrics)
 			services := server.NewServicesWithMetrics(appConfig, appLogger, db, metricReg)
